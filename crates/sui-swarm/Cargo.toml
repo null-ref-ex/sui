@@ -7,21 +7,26 @@ publish = false
 edition = "2021"
 
 [dependencies]
-anyhow = { version = "1.0.58", features = ["backtrace"] }
-rand = "0.7.3"
-tracing = "0.1.35"
-tokio = { version = "1.20.1", features = ["full"] }
-futures = "0.3.21"
-tempfile = "3.3.0"
-tonic-health = "0.6.0"
-tap = "1.0.1"
+anyhow.workspace = true
+rand.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["full"] }
+futures.workspace = true
+tempfile.workspace = true
+tonic-health.workspace = true
+tap.workspace = true
+prometheus.workspace = true
 
-sui-config = { path = "../sui-config" }
-sui-node = { path = "../sui-node" }
-sui-types = { path = "../sui-types" }
+sui-config.workspace = true
+sui-swarm-config.workspace = true
+sui-node.workspace = true
+sui-protocol-config.workspace = true
+sui-types.workspace = true
+mysten-metrics.workspace = true
+mysten-network.workspace = true
+telemetry-subscribers.workspace = true
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
-mysten-network = { git = "https://github.com/MystenLabs/mysten-infra", rev = "123c9e40b529315e1c1d91a54fb717111c3e349c" }
-workspace-hack = { path = "../workspace-hack"}
+[target.'cfg(msim)'.dependencies]
+sui-simulator.workspace = true
 
-[dev-dependencies]
-telemetry-subscribers = { git = "https://github.com/MystenLabs/mysten-infra", rev = "123c9e40b529315e1c1d91a54fb717111c3e349c" }

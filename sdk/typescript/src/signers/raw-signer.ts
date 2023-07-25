@@ -1,38 +1,40 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Ed25519Keypair } from '../cryptography/ed25519-keypair';
-import { Provider } from '../providers/provider';
-import { Base64DataBuffer } from '../serialization/base64';
-import { SuiAddress } from '../types';
-import { SignaturePubkeyPair } from './signer';
-import { SignerWithProvider } from './signer-with-provider';
-import { TxnDataSerializer } from './txn-data-serializers/txn-data-serializer';
+import { blake2b } from '@noble/hashes/blake2b';
+import type { Keypair } from '../cryptography/keypair.js';
+import { toSerializedSignature } from '../cryptography/signature.js';
+import type { SerializedSignature } from '../cryptography/signature.js';
+import type { JsonRpcProvider } from '../providers/json-rpc-provider.js';
+import { SignerWithProvider } from './signer-with-provider.js';
+import type { SuiClient } from '../client/index.js';
 
 export class RawSigner extends SignerWithProvider {
-  private readonly keypair: Ed25519Keypair;
+	private readonly keypair: Keypair;
 
-  constructor(
-    keypair: Ed25519Keypair,
-    provider?: Provider,
-    serializer?: TxnDataSerializer
-  ) {
-    super(provider, serializer);
-    this.keypair = keypair;
-  }
+	constructor(keypair: Keypair, client: JsonRpcProvider | SuiClient) {
+		super(client);
+		this.keypair = keypair;
+	}
 
-  async getAddress(): Promise<SuiAddress> {
-    return this.keypair.getPublicKey().toSuiAddress();
-  }
+	async getAddress(): Promise<string> {
+		return this.keypair.getPublicKey().toSuiAddress();
+	}
 
-  async signData(data: Base64DataBuffer): Promise<SignaturePubkeyPair> {
-    return {
-      signature: this.keypair.signData(data),
-      pubKey: this.keypair.getPublicKey(),
-    };
-  }
+	async signData(data: Uint8Array): Promise<SerializedSignature> {
+		const pubkey = this.keypair.getPublicKey();
+		const digest = blake2b(data, { dkLen: 32 });
+		const signature = this.keypair.signData(digest);
+		const signatureScheme = this.keypair.getKeyScheme();
 
-  connect(provider: Provider): SignerWithProvider {
-    return new RawSigner(this.keypair, provider);
-  }
+		return toSerializedSignature({
+			signatureScheme,
+			signature,
+			pubKey: pubkey,
+		});
+	}
+
+	connect(client: SuiClient | JsonRpcProvider): SignerWithProvider {
+		return new RawSigner(this.keypair, client);
+	}
 }

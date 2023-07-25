@@ -1,21 +1,21 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 module examples::devnet_nft {
     use sui::url::{Self, Url};
-    use sui::utf8;
-    use sui::object::{Self, ID, Info};
+    use std::string;
+    use sui::object::{Self, ID, UID};
     use sui::event;
     use sui::transfer;
     use sui::tx_context::{Self, TxContext};
 
     /// An example NFT that can be minted by anybody
     struct DevNetNFT has key, store {
-        info: Info,
+        id: UID,
         /// Name for the token
-        name: utf8::String,
+        name: string::String,
         /// Description of the token
-        description: utf8::String,
+        description: string::String,
         /// URL for the token
         url: Url,
         // TODO: allow custom attributes
@@ -29,18 +29,18 @@ module examples::devnet_nft {
         // The creator of the NFT
         creator: address,
         // The name of the NFT
-        name: utf8::String,
+        name: string::String,
     }
 
     // ===== Public view functions =====
 
     /// Get the NFT's `name`
-    public fun name(nft: &DevNetNFT): &utf8::String {
+    public fun name(nft: &DevNetNFT): &string::String {
         &nft.name
     }
 
     /// Get the NFT's `description`
-    public fun description(nft: &DevNetNFT): &utf8::String {
+    public fun description(nft: &DevNetNFT): &string::String {
         &nft.description
     }
 
@@ -60,26 +60,26 @@ module examples::devnet_nft {
     ) {
         let sender = tx_context::sender(ctx);
         let nft = DevNetNFT {
-            info: object::new(ctx),
-            name: utf8::string_unsafe(name),
-            description: utf8::string_unsafe(description),
+            id: object::new(ctx),
+            name: string::utf8(name),
+            description: string::utf8(description),
             url: url::new_unsafe_from_bytes(url)
         };
 
         event::emit(NFTMinted {
-            object_id: *object::info_id(&nft.info),
+            object_id: object::id(&nft),
             creator: sender,
             name: nft.name,
         });
 
-        transfer::transfer(nft, sender);
+        transfer::public_transfer(nft, sender);
     }
 
     /// Transfer `nft` to `recipient`
     public entry fun transfer(
         nft: DevNetNFT, recipient: address, _: &mut TxContext
     ) {
-        transfer::transfer(nft, recipient)
+        transfer::public_transfer(nft, recipient)
     }
 
     /// Update the `description` of `nft` to `new_description`
@@ -88,12 +88,12 @@ module examples::devnet_nft {
         new_description: vector<u8>,
         _: &mut TxContext
     ) {
-        nft.description = utf8::string_unsafe(new_description)
+        nft.description = string::utf8(new_description)
     }
 
     /// Permanently delete `nft`
     public entry fun burn(nft: DevNetNFT, _: &mut TxContext) {
-        let DevNetNFT { info, name: _, description: _, url: _ } = nft;
-        object::delete(info)
+        let DevNetNFT { id, name: _, description: _, url: _ } = nft;
+        object::delete(id)
     }
 }

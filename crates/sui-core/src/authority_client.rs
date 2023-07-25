@@ -1,30 +1,26 @@
 // Copyright (c) 2021, Facebook, Inc. and its affiliates
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::authority::AuthorityState;
+use anyhow::anyhow;
 use async_trait::async_trait;
-use futures::{stream::BoxStream, TryStreamExt};
-use multiaddr::Multiaddr;
-use std::sync::Arc;
-
+use mysten_network::config::Config;
+use std::collections::BTreeMap;
+use std::time::Duration;
 use sui_network::{api::ValidatorClient, tonic};
-use sui_types::{error::SuiError, messages::*};
-
+use sui_types::base_types::AuthorityName;
+use sui_types::committee::CommitteeWithNetworkMetadata;
 use sui_types::messages_checkpoint::{CheckpointRequest, CheckpointResponse};
+use sui_types::multiaddr::Multiaddr;
+use sui_types::sui_system_state::SuiSystemState;
+use sui_types::{error::SuiError, transaction::*};
 
-#[cfg(test)]
-use sui_types::{
-    base_types::ObjectID,
-    committee::Committee,
-    crypto::{KeyPair, PublicKeyBytes},
-    object::Object,
-};
-
-use crate::epoch::reconfiguration::Reconfigurable;
-#[cfg(test)]
-use sui_config::genesis::Genesis;
 use sui_network::tonic::transport::Channel;
+use sui_types::messages_grpc::{
+    HandleCertificateResponse, HandleCertificateResponseV2, HandleTransactionResponse,
+    ObjectInfoRequest, ObjectInfoResponse, SystemStateRequest, TransactionInfoRequest,
+    TransactionInfoResponse,
+};
 
 #[async_trait]
 pub trait AuthorityAPI {
@@ -32,19 +28,19 @@ pub trait AuthorityAPI {
     async fn handle_transaction(
         &self,
         transaction: Transaction,
-    ) -> Result<TransactionInfoResponse, SuiError>;
+    ) -> Result<HandleTransactionResponse, SuiError>;
 
     /// Execute a certificate.
     async fn handle_certificate(
         &self,
         certificate: CertifiedTransaction,
-    ) -> Result<TransactionInfoResponse, SuiError>;
+    ) -> Result<HandleCertificateResponse, SuiError>;
 
-    /// Handle Account information requests for this account.
-    async fn handle_account_info_request(
+    /// Execute a certificate.
+    async fn handle_certificate_v2(
         &self,
-        request: AccountInfoRequest,
-    ) -> Result<AccountInfoResponse, SuiError>;
+        certificate: CertifiedTransaction,
+    ) -> Result<HandleCertificateResponseV2, SuiError>;
 
     /// Handle Object information requests for this account.
     async fn handle_object_info_request(
@@ -58,54 +54,46 @@ pub trait AuthorityAPI {
         request: TransactionInfoRequest,
     ) -> Result<TransactionInfoResponse, SuiError>;
 
-    async fn handle_batch_stream(
-        &self,
-        request: BatchInfoRequest,
-    ) -> Result<BatchInfoResponseItemStream, SuiError>;
-
     async fn handle_checkpoint(
         &self,
         request: CheckpointRequest,
     ) -> Result<CheckpointResponse, SuiError>;
-}
 
-pub type BatchInfoResponseItemStream = BoxStream<'static, Result<BatchInfoResponseItem, SuiError>>;
+    // This API is exclusively used by the benchmark code.
+    // Hence it's OK to return a fixed system state type.
+    async fn handle_system_state_object(
+        &self,
+        request: SystemStateRequest,
+    ) -> Result<SuiSystemState, SuiError>;
+}
 
 #[derive(Clone)]
 pub struct NetworkAuthorityClient {
-    client: ValidatorClient<tonic::transport::Channel>,
+    client: ValidatorClient<Channel>,
 }
 
 impl NetworkAuthorityClient {
     pub async fn connect(address: &Multiaddr) -> anyhow::Result<Self> {
-        let channel = mysten_network::client::connect(address).await?;
+        let channel = mysten_network::client::connect(address)
+            .await
+            .map_err(|err| anyhow!(err.to_string()))?;
         Ok(Self::new(channel))
     }
 
     pub fn connect_lazy(address: &Multiaddr) -> anyhow::Result<Self> {
-        let channel = mysten_network::client::connect_lazy(address)?;
+        let channel = mysten_network::client::connect_lazy(address)
+            .map_err(|err| anyhow!(err.to_string()))?;
         Ok(Self::new(channel))
     }
 
-    pub fn new(channel: tonic::transport::Channel) -> Self {
+    pub fn new(channel: Channel) -> Self {
         Self {
             client: ValidatorClient::new(channel),
         }
     }
 
-    fn client(&self) -> ValidatorClient<tonic::transport::Channel> {
+    fn client(&self) -> ValidatorClient<Channel> {
         self.client.clone()
-    }
-}
-
-#[async_trait]
-impl Reconfigurable for NetworkAuthorityClient {
-    fn needs_network_recreation() -> bool {
-        true
-    }
-
-    fn recreate(channel: tonic::transport::Channel) -> Self {
-        NetworkAuthorityClient::new(channel)
     }
 }
 
@@ -115,7 +103,7 @@ impl AuthorityAPI for NetworkAuthorityClient {
     async fn handle_transaction(
         &self,
         transaction: Transaction,
-    ) -> Result<TransactionInfoResponse, SuiError> {
+    ) -> Result<HandleTransactionResponse, SuiError> {
         self.client()
             .transaction(transaction)
             .await
@@ -127,7 +115,7 @@ impl AuthorityAPI for NetworkAuthorityClient {
     async fn handle_certificate(
         &self,
         certificate: CertifiedTransaction,
-    ) -> Result<TransactionInfoResponse, SuiError> {
+    ) -> Result<HandleCertificateResponse, SuiError> {
         self.client()
             .handle_certificate(certificate)
             .await
@@ -135,15 +123,35 @@ impl AuthorityAPI for NetworkAuthorityClient {
             .map_err(Into::into)
     }
 
-    async fn handle_account_info_request(
+    /// Execute a certificate.
+    async fn handle_certificate_v2(
         &self,
-        request: AccountInfoRequest,
-    ) -> Result<AccountInfoResponse, SuiError> {
-        self.client()
-            .account_info(request)
+        certificate: CertifiedTransaction,
+    ) -> Result<HandleCertificateResponseV2, SuiError> {
+        let response = self
+            .client()
+            .handle_certificate_v2(certificate.clone())
             .await
-            .map(tonic::Response::into_inner)
-            .map_err(Into::into)
+            .map(tonic::Response::into_inner);
+
+        if response.is_ok() {
+            return response.map_err(Into::into);
+        }
+        // TODO: remove this once all validators upgrade
+        if response.as_ref().err().unwrap().code() == tonic::Code::Unimplemented {
+            let response = self
+                .client()
+                .handle_certificate(certificate)
+                .await
+                .map(tonic::Response::into_inner)
+                .map_err(SuiError::from)?;
+            return Ok(HandleCertificateResponseV2 {
+                signed_effects: response.signed_effects,
+                events: response.events,
+                fastpath_input_objects: vec![],
+            });
+        }
+        response.map_err(Into::into)
     }
 
     async fn handle_object_info_request(
@@ -169,21 +177,6 @@ impl AuthorityAPI for NetworkAuthorityClient {
             .map_err(Into::into)
     }
 
-    /// Handle Batch information requests for this authority.
-    async fn handle_batch_stream(
-        &self,
-        request: BatchInfoRequest,
-    ) -> Result<BatchInfoResponseItemStream, SuiError> {
-        let stream = self
-            .client()
-            .batch_info(request)
-            .await
-            .map(tonic::Response::into_inner)?
-            .map_err(Into::into);
-
-        Ok(Box::pin(stream))
-    }
-
     /// Handle Object information requests for this account.
     async fn handle_checkpoint(
         &self,
@@ -195,195 +188,48 @@ impl AuthorityAPI for NetworkAuthorityClient {
             .map(tonic::Response::into_inner)
             .map_err(Into::into)
     }
-}
 
-#[derive(Clone, Copy, Default)]
-pub struct LocalAuthorityClientFaultConfig {
-    pub fail_before_handle_transaction: bool,
-    pub fail_after_handle_transaction: bool,
-    pub fail_before_handle_confirmation: bool,
-    pub fail_after_handle_confirmation: bool,
-}
-
-impl LocalAuthorityClientFaultConfig {
-    pub fn reset(&mut self) {
-        *self = Self::default();
+    async fn handle_system_state_object(
+        &self,
+        request: SystemStateRequest,
+    ) -> Result<SuiSystemState, SuiError> {
+        self.client()
+            .get_system_state_object(request)
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(Into::into)
     }
 }
 
-#[derive(Clone)]
-pub struct LocalAuthorityClient {
-    pub state: Arc<AuthorityState>,
-    pub fault_config: LocalAuthorityClientFaultConfig,
+pub fn make_network_authority_clients_with_network_config(
+    committee: &CommitteeWithNetworkMetadata,
+    network_config: &Config,
+) -> anyhow::Result<BTreeMap<AuthorityName, NetworkAuthorityClient>> {
+    let mut authority_clients = BTreeMap::new();
+    for (name, _stakes) in &committee.committee.voting_rights {
+        let address = &committee
+            .network_metadata
+            .get(name)
+            .ok_or_else(|| {
+                SuiError::from("Missing network metadata in CommitteeWithNetworkMetadata")
+            })?
+            .network_address;
+        let channel = network_config
+            .connect_lazy(address)
+            .map_err(|err| anyhow!(err.to_string()))?;
+        let client = NetworkAuthorityClient::new(channel);
+        authority_clients.insert(*name, client);
+    }
+    Ok(authority_clients)
 }
 
-impl Reconfigurable for LocalAuthorityClient {
-    fn needs_network_recreation() -> bool {
-        false
-    }
-
-    fn recreate(_channel: Channel) -> Self {
-        unreachable!(); // this function should not get called because the above function returns false
-    }
-}
-
-#[async_trait]
-impl AuthorityAPI for LocalAuthorityClient {
-    async fn handle_transaction(
-        &self,
-        transaction: Transaction,
-    ) -> Result<TransactionInfoResponse, SuiError> {
-        if self.fault_config.fail_before_handle_transaction {
-            return Err(SuiError::from("Mock error before handle_transaction"));
-        }
-        let state = self.state.clone();
-        let result = state.handle_transaction(transaction).await;
-        if self.fault_config.fail_after_handle_transaction {
-            return Err(SuiError::GenericAuthorityError {
-                error: "Mock error after handle_transaction".to_owned(),
-            });
-        }
-        result
-    }
-
-    async fn handle_certificate(
-        &self,
-        certificate: CertifiedTransaction,
-    ) -> Result<TransactionInfoResponse, SuiError> {
-        if self.fault_config.fail_before_handle_confirmation {
-            return Err(SuiError::GenericAuthorityError {
-                error: "Mock error before handle_confirmation_transaction".to_owned(),
-            });
-        }
-        let state = self.state.clone();
-        let result = state.handle_certificate(certificate).await;
-        if self.fault_config.fail_after_handle_confirmation {
-            return Err(SuiError::GenericAuthorityError {
-                error: "Mock error after handle_confirmation_transaction".to_owned(),
-            });
-        }
-        result
-    }
-
-    async fn handle_account_info_request(
-        &self,
-        request: AccountInfoRequest,
-    ) -> Result<AccountInfoResponse, SuiError> {
-        let state = self.state.clone();
-        state.handle_account_info_request(request).await
-    }
-
-    async fn handle_object_info_request(
-        &self,
-        request: ObjectInfoRequest,
-    ) -> Result<ObjectInfoResponse, SuiError> {
-        let state = self.state.clone();
-        state.handle_object_info_request(request).await
-    }
-
-    /// Handle Object information requests for this account.
-    async fn handle_transaction_info_request(
-        &self,
-        request: TransactionInfoRequest,
-    ) -> Result<TransactionInfoResponse, SuiError> {
-        let state = self.state.clone();
-        state.handle_transaction_info_request(request).await
-    }
-
-    /// Handle Batch information requests for this authority.
-    async fn handle_batch_stream(
-        &self,
-        request: BatchInfoRequest,
-    ) -> Result<BatchInfoResponseItemStream, SuiError> {
-        let state = self.state.clone();
-
-        let update_items = state.handle_batch_streaming(request).await?;
-        Ok(Box::pin(update_items))
-    }
-
-    async fn handle_checkpoint(
-        &self,
-        request: CheckpointRequest,
-    ) -> Result<CheckpointResponse, SuiError> {
-        let state = self.state.clone();
-
-        state.handle_checkpoint_request(&request)
-    }
-}
-
-impl LocalAuthorityClient {
-    #[cfg(test)]
-    pub async fn new(
-        committee: Committee,
-        address: PublicKeyBytes,
-        secret: KeyPair,
-        genesis: &Genesis,
-    ) -> Self {
-        use crate::authority::AuthorityStore;
-        use crate::checkpoints::CheckpointStore;
-        use parking_lot::Mutex;
-        use std::{env, fs};
-
-        // Random directory
-        let dir = env::temp_dir();
-        let path = dir.join(format!("DB_{:?}", ObjectID::random()));
-        fs::create_dir(&path).unwrap();
-
-        let secret = Arc::pin(secret);
-
-        let mut store_path = path.clone();
-        store_path.push("store");
-        let store = Arc::new(AuthorityStore::open(&store_path, None));
-        let mut checkpoints_path = path.clone();
-        checkpoints_path.push("checkpoints");
-        let checkpoints = CheckpointStore::open(
-            &checkpoints_path,
-            None,
-            committee.epoch,
-            address,
-            secret.clone(),
-        )
-        .expect("Should not fail to open local checkpoint DB");
-
-        let state = AuthorityState::new(
-            committee.clone(),
-            address,
-            secret.clone(),
-            store,
-            None,
-            None,
-            Some(Arc::new(Mutex::new(checkpoints))),
-            genesis,
-            &prometheus::Registry::new(),
-        )
-        .await;
-        Self {
-            state: Arc::new(state),
-            fault_config: LocalAuthorityClientFaultConfig::default(),
-        }
-    }
-
-    #[cfg(test)]
-    pub async fn new_with_objects(
-        committee: Committee,
-        address: PublicKeyBytes,
-        secret: KeyPair,
-        objects: Vec<Object>,
-        genesis: &Genesis,
-    ) -> Self {
-        let client = Self::new(committee, address, secret, genesis).await;
-
-        for object in objects {
-            client.state.insert_genesis_object(object).await;
-        }
-
-        client
-    }
-
-    pub fn new_from_authority(state: Arc<AuthorityState>) -> Self {
-        Self {
-            state,
-            fault_config: LocalAuthorityClientFaultConfig::default(),
-        }
-    }
+pub fn make_authority_clients_with_timeout_config(
+    committee: &CommitteeWithNetworkMetadata,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> anyhow::Result<BTreeMap<AuthorityName, NetworkAuthorityClient>> {
+    let mut network_config = mysten_network::config::Config::new();
+    network_config.connect_timeout = Some(connect_timeout);
+    network_config.request_timeout = Some(request_timeout);
+    make_network_authority_clients_with_network_config(committee, &network_config)
 }

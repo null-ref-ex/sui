@@ -1,125 +1,148 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import BN from 'bn.js';
-import { Buffer } from 'buffer';
-import { sha3_256 } from 'js-sha3';
+import { toB64 } from '@mysten/bcs';
+import { IntentScope, messageWithIntent } from './intent.js';
+import { blake2b } from '@noble/hashes/blake2b';
+import { bcs } from '../types/sui-bcs.js';
+import type { SerializedSignature } from './index.js';
+import { SUI_ADDRESS_LENGTH, normalizeSuiAddress } from '../utils/sui-types.js';
+import { bytesToHex } from '@noble/hashes/utils';
 
 /**
- * Value to be converted into public key
+ * Value to be converted into public key.
  */
-export type PublicKeyInitData =
-  | number
-  | string
-  | Buffer
-  | Uint8Array
-  | Array<number>
-  | PublicKeyData;
+export type PublicKeyInitData = string | Uint8Array | Iterable<number>;
 
-/**
- * JSON object representation of PublicKey class
- */
-export type PublicKeyData = {
-  /** @internal */
-  _bn: BN;
-};
+export function bytesEqual(a: Uint8Array, b: Uint8Array) {
+	if (a === b) return true;
 
-export const PUBLIC_KEY_SIZE = 32;
+	if (a.length !== b.length) {
+		return false;
+	}
 
-function isPublicKeyData(value: PublicKeyInitData): value is PublicKeyData {
-  return (value as PublicKeyData)._bn !== undefined;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) {
+			return false;
+		}
+	}
+	return true;
 }
 
 /**
  * A public key
  */
-export class PublicKey {
-  /** @internal */
-  _bn: BN;
+export abstract class PublicKey {
+	/**
+	 * Checks if two public keys are equal
+	 */
+	equals(publicKey: PublicKey) {
+		return bytesEqual(this.toRawBytes(), publicKey.toRawBytes());
+	}
 
-  /**
-   * Create a new PublicKey object
-   * @param value ed25519 public key as buffer or base-64 encoded string
-   */
-  constructor(value: PublicKeyInitData) {
-    if (isPublicKeyData(value)) {
-      this._bn = value._bn;
-    } else {
-      if (typeof value === 'string') {
-        const buffer = Buffer.from(value, 'base64');
-        if (buffer.length !== 32) {
-          throw new Error(
-            `Invalid public key input. Expected 32 bytes, got ${buffer.length}`
-          );
-        }
-        this._bn = new BN(buffer);
-      } else {
-        this._bn = new BN(value);
-      }
-      if (this._bn.byteLength() > PUBLIC_KEY_SIZE) {
-        throw new Error(`Invalid public key input`);
-      }
-    }
-  }
+	/**
+	 * Return the base-64 representation of the public key
+	 */
+	toBase64() {
+		return toB64(this.toRawBytes());
+	}
 
-  /**
-   * Checks if two publicKeys are equal
-   */
-  equals(publicKey: PublicKey): boolean {
-    return this._bn.eq(publicKey._bn);
-  }
+	/**
+	 * @deprecated use toBase64 instead.
+	 *
+	 * Return the base-64 representation of the public key
+	 */
+	toString() {
+		return this.toBase64();
+	}
 
-  /**
-   * Return the base-64 representation of the public key
-   */
-  toBase64(): string {
-    return this.toBuffer().toString('base64');
-  }
+	/**
+	 * Return the Sui representation of the public key encoded in
+	 * base-64. A Sui public key is formed by the concatenation
+	 * of the scheme flag with the raw bytes of the public key
+	 */
+	toSuiPublicKey(): string {
+		const bytes = this.toSuiBytes();
+		return toB64(bytes);
+	}
 
-  /**
-   * Return the byte array representation of the public key
-   */
-  toBytes(): Uint8Array {
-    return this.toBuffer();
-  }
+	verifyWithIntent(
+		bytes: Uint8Array,
+		signature: Uint8Array | SerializedSignature,
+		intent: IntentScope,
+	): Promise<boolean> {
+		const intentMessage = messageWithIntent(intent, bytes);
+		const digest = blake2b(intentMessage, { dkLen: 32 });
 
-  /**
-   * Return the Buffer representation of the public key
-   */
-  toBuffer(): Buffer {
-    const b = this._bn.toArrayLike(Buffer);
-    if (b.length === PUBLIC_KEY_SIZE) {
-      return b;
-    }
+		return this.verify(digest, signature);
+	}
 
-    const zeroPad = Buffer.alloc(PUBLIC_KEY_SIZE);
-    b.copy(zeroPad, PUBLIC_KEY_SIZE - b.length);
-    return zeroPad;
-  }
+	/**
+	 * Verifies that the signature is valid for for the provided PersonalMessage
+	 */
+	verifyPersonalMessage(
+		message: Uint8Array,
+		signature: Uint8Array | SerializedSignature,
+	): Promise<boolean> {
+		return this.verifyWithIntent(
+			bcs.ser(['vector', 'u8'], message).toBytes(),
+			signature,
+			IntentScope.PersonalMessage,
+		);
+	}
 
-  /**
-   * Return the base-64 representation of the public key
-   */
-  toString(): string {
-    return this.toBase64();
-  }
+	/**
+	 * Verifies that the signature is valid for for the provided TransactionBlock
+	 */
+	verifyTransactionBlock(
+		transactionBlock: Uint8Array,
+		signature: Uint8Array | SerializedSignature,
+	): Promise<boolean> {
+		return this.verifyWithIntent(transactionBlock, signature, IntentScope.TransactionData);
+	}
 
-  /**
-   * Return the Sui address associated with this public key
-   */
-  toSuiAddress(): string {
-    const hexHash = sha3_256(this.toBytes());
-    const publicKeyBytes = new BN(hexHash, 16).toArray(undefined, 32);
-    // Only take the first 20 bytes
-    const addressBytes = publicKeyBytes.slice(0, 20);
-    return toHexString(addressBytes);
-  }
-}
+	/**
+	 * Returns the bytes representation of the public key
+	 * prefixed with the signature scheme flag
+	 */
+	toSuiBytes(): Uint8Array {
+		const rawBytes = this.toRawBytes();
+		const suiBytes = new Uint8Array(rawBytes.length + 1);
+		suiBytes.set([this.flag()]);
+		suiBytes.set(rawBytes, 1);
 
-// https://stackoverflow.com/questions/34309988/byte-array-to-hex-string-conversion-in-javascript
-function toHexString(byteArray: number[]) {
-  return byteArray.reduce(
-    (output, elem) => output + ('0' + elem.toString(16)).slice(-2),
-    ''
-  );
+		return suiBytes;
+	}
+
+	/**
+	 * @deprecated use `toRawBytes` instead.
+	 */
+	toBytes() {
+		return this.toRawBytes();
+	}
+
+	/**
+	 * Return the Sui address associated with this Ed25519 public key
+	 */
+	toSuiAddress(): string {
+		// Each hex char represents half a byte, hence hex address doubles the length
+		return normalizeSuiAddress(
+			bytesToHex(blake2b(this.toSuiBytes(), { dkLen: 32 })).slice(0, SUI_ADDRESS_LENGTH * 2),
+		);
+	}
+
+	/**
+	 * Return the byte array representation of the public key
+	 */
+	abstract toRawBytes(): Uint8Array;
+
+	/**
+	 * Return signature scheme flag of the public key
+	 */
+	abstract flag(): number;
+
+	/**
+	 * Verifies that the signature is valid for for the provided message
+	 */
+	abstract verify(data: Uint8Array, signature: Uint8Array | SerializedSignature): Promise<boolean>;
 }

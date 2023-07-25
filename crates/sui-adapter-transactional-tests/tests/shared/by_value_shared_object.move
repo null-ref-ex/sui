@@ -1,4 +1,4 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 // tests that shared objects can
@@ -8,31 +8,31 @@
 //# publish
 
 module t2::o2 {
-    use sui::object::{Self, Info};
+    use sui::object::{Self, UID};
     use sui::transfer;
     use sui::tx_context::TxContext;
 
-    struct O2 has key, store {
-        info: Info,
+    struct Obj2 has key, store {
+        id: UID,
     }
 
     public entry fun create(ctx: &mut TxContext) {
-        let o = O2 { info: object::new(ctx) };
-        transfer::share_object(o)
+        let o = Obj2 { id: object::new(ctx) };
+        transfer::public_share_object(o)
     }
 
-    public entry fun consume_o2(o2: O2) {
-        let O2 { info } = o2;
-        object::delete(info);
+    public entry fun consume_o2(o2: Obj2) {
+        let Obj2 { id } = o2;
+        object::delete(id);
     }
 }
 
-//# publish
+//# publish --dependencies t2
 
 module t1::o1 {
-    use t2::o2::{Self, O2};
+    use t2::o2::{Self, Obj2};
 
-    public entry fun consume_o2(o2: O2) {
+    public entry fun consume_o2(o2: Obj2) {
         o2::consume_o2(o2);
     }
 }
@@ -40,8 +40,8 @@ module t1::o1 {
 
 //# run t2::o2::create
 
-//# view-object 107
+//# view-object 3,0
 
-//# run t1::o1::consume_o2 --args object(107)
+//# run t1::o1::consume_o2 --args object(3,0)
 
-//# run t2::o2::consume_o2 --args object(107)
+//# run t2::o2::consume_o2 --args object(3,0)

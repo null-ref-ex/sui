@@ -1,12 +1,15 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 // tests TransferObject with a SUI coin
 
-//# init --accounts A B
+//# init --accounts A B C
 
-//# view-object 100
+//# programmable --sender C --inputs @A
+//> TransferObjects([Gas], Input(0))
 
-//# transfer-object 100 --sender A --recipient B
+//# view-object 0,2
 
-//# view-object 100
+//# transfer-object 0,2 --sender A --recipient B
+
+//# view-object 0,2

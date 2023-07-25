@@ -1,5 +1,6 @@
 processed 1 task
 
-task 0 'publish'. lines 4-19:
-Error: Transaction Effects Status: Sui Move Bytecode Verification Error. Please run the Sui Move Verifier for more information.
-Execution Error: ExecutionError: ExecutionError { inner: ExecutionErrorInner { kind: SuiMoveVerificationError, source: Some("ID leak detected in function foo: ExecutionError: ExecutionError { inner: ExecutionErrorInner { kind: SuiMoveVerificationError, source: Some(\"ID leaked through function return.\") } }") } }
+task 0 'publish'. lines 4-20:
+created: object(1,0)
+mutated: object(0,0)
+gas summary: computation_cost: 1000000, storage_cost: 4294000,  storage_rebate: 0, non_refundable_storage_fee: 0

@@ -1,21 +1,25 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::client_commands::SwitchResponse;
-use crate::client_commands::{SuiClientCommandResult, SuiClientCommands, WalletContext};
-use crate::shell::{
-    install_shell_plugins, AsyncHandler, CacheKey, CommandStructure, CompletionCache, Shell,
-};
+use std::io::{stderr, Write};
+use std::ops::Deref;
+
 use async_trait::async_trait;
 use clap::Command;
 use clap::CommandFactory;
 use clap::FromArgMatches;
 use clap::Parser;
 use colored::Colorize;
-use std::io::{stderr, Write};
-use std::ops::Deref;
-const SUI: &str = "   _____       _    ______                       __   
-  / ___/__  __(_)  / ____/___  ____  _________  / /__ 
+use sui_sdk::wallet_context::WalletContext;
+
+use crate::client_commands::SwitchResponse;
+use crate::client_commands::{SuiClientCommandResult, SuiClientCommands};
+use crate::shell::{
+    install_shell_plugins, AsyncHandler, CacheKey, CommandStructure, CompletionCache, Shell,
+};
+
+const SUI: &str = "   _____       _    ______                       __
+  / ___/__  __(_)  / ____/___  ____  _________  / /__
   \\__ \\/ / / / /  / /   / __ \\/ __ \\/ ___/ __ \\/ / _ \\
  ___/ / /_/ / /  / /___/ /_/ / / / (__  ) /_/ / /  __/
 /____/\\__,_/_/   \\____/\\____/_/ /_/____/\\____/_/\\___/";
@@ -32,15 +36,12 @@ pub struct ConsoleOpts {
 
 pub async fn start_console(
     context: WalletContext,
-    out: &mut dyn Write,
-    err: &mut dyn Write,
+    out: &mut (dyn Write + Send),
+    err: &mut (dyn Write + Send),
 ) -> Result<(), anyhow::Error> {
     let app: Command = SuiClientCommands::command();
     writeln!(out, "{}", SUI.cyan().bold())?;
-    let mut version = app
-        .get_long_version()
-        .unwrap_or_else(|| app.get_version().unwrap_or("unknown"))
-        .to_owned();
+    let mut version = env!("CARGO_PKG_VERSION").to_owned();
     if let Some(git_rev) = std::option_env!("GIT_REVISION") {
         version.push('-');
         version.push_str(git_rev);
@@ -48,6 +49,32 @@ pub async fn start_console(
     writeln!(out, "--- Sui Console {version} ---")?;
     writeln!(out)?;
     writeln!(out, "{}", context.config.deref())?;
+
+    let client = context.get_client().await?;
+    writeln!(
+        out,
+        "Connecting to Sui full node. API version {}",
+        client.api_version()
+    )?;
+
+    if !client.available_rpc_methods().is_empty() {
+        writeln!(out)?;
+        writeln!(
+            out,
+            "Available RPC methods: {:?}",
+            client.available_rpc_methods()
+        )?;
+    }
+    if !client.available_subscriptions().is_empty() {
+        writeln!(out)?;
+        writeln!(
+            out,
+            "Available Subscriptions: {:?}",
+            client.available_subscriptions()
+        )?;
+    }
+
+    writeln!(out)?;
     writeln!(out, "Welcome to the Sui interactive console.")?;
     writeln!(out)?;
 
@@ -100,7 +127,7 @@ async fn handle_command(
     // TODO: Completion data are keyed by strings, are there ways to make it more error proof?
     if let Ok(mut cache) = completion_cache.write() {
         match result {
-            SuiClientCommandResult::Addresses(ref addresses) => {
+            SuiClientCommandResult::Addresses(ref addresses, _) => {
                 let addresses = addresses
                     .iter()
                     .map(|addr| format!("{addr}"))
@@ -111,7 +138,7 @@ async fn handle_command(
             SuiClientCommandResult::Objects(ref objects) => {
                 let objects = objects
                     .iter()
-                    .map(|oref| format!("{}", oref.object_id))
+                    .map(|oref| format!("{}", oref.clone().into_object().unwrap().object_id))
                     .collect::<Vec<_>>();
                 cache.insert(CacheKey::new("object", "--id"), objects.clone());
                 cache.insert(CacheKey::flag("--gas"), objects.clone());
@@ -122,15 +149,12 @@ async fn handle_command(
     }
     result.print(!wallet_opts.json);
 
-    // Quit shell after gateway switch
+    // Quit shell after RPC switch
     if matches!(
         result,
-        SuiClientCommandResult::Switch(SwitchResponse {
-            gateway: Some(_),
-            ..
-        })
+        SuiClientCommandResult::Switch(SwitchResponse { env: Some(_), .. })
     ) {
-        println!("Gateway switch completed, please restart Sui console.");
+        println!("Sui environment switch completed, please restart Sui console.");
         return Ok(true);
     }
     Ok(false)

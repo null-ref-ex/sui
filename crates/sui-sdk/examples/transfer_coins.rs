@@ -1,40 +1,50 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::str::FromStr;
-use sui_sdk::crypto::{Keystore, SuiKeystore};
-use sui_sdk::types::base_types::{ObjectID, SuiAddress};
-use sui_sdk::types::sui_serde::Base64;
-use sui_sdk::SuiClient;
+use shared_crypto::intent::Intent;
+use sui_json_rpc_types::SuiTransactionBlockResponseOptions;
+use sui_keys::keystore::{AccountKeystore, FileBasedKeystore, Keystore};
+use sui_sdk::{
+    types::{
+        base_types::{ObjectID, SuiAddress},
+        transaction::Transaction,
+    },
+    SuiClientBuilder,
+};
+use sui_types::quorum_driver_types::ExecuteTransactionRequestType;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let sui = SuiClient::new_http_client("https://gateway.devnet.sui.io:443")?;
+    let sui = SuiClientBuilder::default()
+        .build("https://fullnode.devnet.sui.io:443")
+        .await?;
     // Load keystore from ~/.sui/sui_config/sui.keystore
     let keystore_path = match dirs::home_dir() {
         Some(v) => v.join(".sui").join("sui_config").join("sui.keystore"),
         None => panic!("Cannot obtain home directory path"),
     };
-    let keystore = SuiKeystore::load_or_create(&keystore_path)?;
 
-    let my_address = SuiAddress::from_str("0x47722589dc23d63e82862f7814070002ffaaa465")?;
-    let gas_object_id = ObjectID::from_str("0x273b2a83f1af1fda3ddbc02ad31367fcb146a814")?;
-    let recipient = SuiAddress::from_str("0xbd42a850e81ebb8f80283266951d4f4f5722e301")?;
+    let my_address = SuiAddress::random_for_testing_only();
+    let gas_object_id = ObjectID::random();
+    let recipient = SuiAddress::random_for_testing_only();
 
     // Create a sui transfer transaction
     let transfer_tx = sui
+        .transaction_builder()
         .transfer_sui(my_address, gas_object_id, 1000, recipient, Some(1000))
         .await?;
 
-    // Sign the transaction
-    let signature = keystore.sign(&my_address, &transfer_tx.tx_bytes.to_vec()?)?;
+    // Sign transaction
+    let keystore = Keystore::from(FileBasedKeystore::new(&keystore_path)?);
+    let signature = keystore.sign_secure(&my_address, &transfer_tx, Intent::sui_transaction())?;
 
     // Execute the transaction
     let transaction_response = sui
-        .execute_transaction(
-            transfer_tx.tx_bytes,
-            Base64::from_bytes(signature.signature_bytes()),
-            Base64::from_bytes(signature.public_key_bytes()),
+        .quorum_driver_api()
+        .execute_transaction_block(
+            Transaction::from_data(transfer_tx, Intent::sui_transaction(), vec![signature]),
+            SuiTransactionBlockResponseOptions::full_content(),
+            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
         )
         .await?;
 

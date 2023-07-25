@@ -1,19 +1,26 @@
-processed 5 tasks
+processed 6 tasks
 
 init:
-A: object(100)
+A: object(0,0)
 
-task 1 'run'. lines 8-8:
-created: object(104)
-written: object(103)
+task 1 'publish'. lines 8-70:
+created: object(1,0)
+mutated: object(0,1)
+gas summary: computation_cost: 1000000, storage_cost: 9241600,  storage_rebate: 0, non_refundable_storage_fee: 0
 
-task 2 'run'. lines 10-10:
-written: object(104), object(105)
+task 2 'run'. lines 72-72:
+created: object(2,0)
+mutated: object(0,0)
+gas summary: computation_cost: 1000000, storage_cost: 2386400,  storage_rebate: 0, non_refundable_storage_fee: 0
 
-task 3 'run'. lines 12-12:
-Error: Transaction Effects Status: Entry Argument Type Error. Error for argument at index 0: Immutable and shared objects cannot be passed by-value.
-Execution Error: ExecutionError: ExecutionError { inner: ExecutionErrorInner { kind: EntryArgumentError(EntryArgumentError { argument_idx: 0, kind: InvalidObjectByValue }), source: Some("Immutable and shared objects cannot be passed by-value, violation found in argument 0") } }
+task 3 'run'. lines 74-74:
+mutated: object(0,0), object(2,0)
+gas summary: computation_cost: 1000000, storage_cost: 2386400,  storage_rebate: 2362536, non_refundable_storage_fee: 23864
 
-task 4 'run'. lines 14-14:
-Error: Transaction Effects Status: Entry Argument Type Error. Error for argument at index 0: Immutable objects cannot be passed by mutable reference, &mut.
-Execution Error: ExecutionError: ExecutionError { inner: ExecutionErrorInner { kind: EntryArgumentError(EntryArgumentError { argument_idx: 0, kind: InvalidObjectByMuteRef }), source: Some("Argument 0 is expected to be mutable, immutable object found") } }
+task 4 'run'. lines 76-76:
+Error: Transaction Effects Status: Invalid command argument at 0. Immutable and shared objects cannot be passed by-value.
+Execution Error: ExecutionError: ExecutionError { inner: ExecutionErrorInner { kind: CommandArgumentError { arg_idx: 0, kind: InvalidObjectByValue }, source: None, command: Some(0) } }
+
+task 5 'run'. lines 78-78:
+Error: Transaction Effects Status: Invalid command argument at 0. Immutable objects cannot be passed by mutable reference, &mut.
+Execution Error: ExecutionError: ExecutionError { inner: ExecutionErrorInner { kind: CommandArgumentError { arg_idx: 0, kind: InvalidObjectByMutRef }, source: None, command: Some(0) } }

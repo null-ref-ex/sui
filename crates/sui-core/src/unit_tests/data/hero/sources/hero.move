@@ -1,4 +1,4 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 /// Example of a game character with basic attributes, inventory, and
@@ -7,7 +7,7 @@ module examples::hero {
     use examples::trusted_coin::EXAMPLE;
     use sui::coin::{Self, Coin};
     use sui::event;
-    use sui::object::{Self, ID, Info};
+    use sui::object::{Self, ID, UID};
     use sui::math;
     use sui::transfer;
     use sui::tx_context::{Self, TxContext};
@@ -15,7 +15,7 @@ module examples::hero {
 
     /// Our hero!
     struct Hero has key, store {
-        info: Info,
+        id: UID,
         /// Hit points. If they go to zero, the hero can't do anything
         hp: u64,
         /// Experience of the hero. Begins at zero
@@ -26,7 +26,7 @@ module examples::hero {
 
     /// The hero's trusty sword
     struct Sword has key, store {
-        info: Info,
+        id: UID,
         /// Constant set at creation. Acts as a multiplier on sword's strength.
         /// Swords with high magic are rarer (because they cost more).
         magic: u64,
@@ -36,14 +36,14 @@ module examples::hero {
 
     /// For healing wounded heroes
     struct Potion has key, store {
-        info: Info,
+        id: UID,
         /// Effectiveness of the potion
         potency: u64
     }
 
     /// A creature that the hero can slay to level up
     struct Boar has key {
-        info: Info,
+        id: UID,
         /// Hit points before the boar is slain
         hp: u64,
         /// Strength of this particular boar
@@ -52,7 +52,7 @@ module examples::hero {
 
     /// Capability conveying the authority to create boars and potions
     struct GameAdmin has key {
-        info: Info,
+        id: UID,
         /// Total number of boars the admin has created
         boars_created: u64,
         /// Total number of potions the admin has created
@@ -70,7 +70,7 @@ module examples::hero {
     }
 
     /// Address of the admin account that receives payment for swords
-    const ADMIN: address = @0xee0437cf625b77af4d12bff98af1a88332b00638;
+    const ADMIN: address = @0x1;
     /// Upper bound on player's HP
     const MAX_HP: u64 = 1000;
     /// Upper bound on how magical a sword can be
@@ -100,9 +100,9 @@ module examples::hero {
         let admin = admin();
         // ensure this is being initialized by the expected admin authenticator
         assert!(&tx_context::sender(ctx) == &admin, ENOT_ADMIN);
-        transfer::transfer(
+        transfer::public_transfer(
             GameAdmin {
-                info: object::new(ctx),
+                id: object::new(ctx),
                 boars_created: 0,
                 potions_created: 0
             },
@@ -115,7 +115,7 @@ module examples::hero {
     /// Slay the `boar` with the `hero`'s sword, get experience.
     /// Aborts if the hero has 0 HP or is not strong enough to slay the boar
     public entry fun slay(hero: &mut Hero, boar: Boar, ctx: &mut TxContext) {
-        let Boar { info: boar_info, strength: boar_strength, hp } = boar;
+        let Boar { id: boar_id, strength: boar_strength, hp } = boar;
         let hero_strength = hero_strength(hero);
         let boar_hp = hp;
         let hero_hp = hero.hp;
@@ -140,10 +140,10 @@ module examples::hero {
         // let the world know about the hero's triumph by emitting an event!
         event::emit(BoarSlainEvent {
             slayer_address: tx_context::sender(ctx),
-            hero: *object::info_id(&hero.info),
-            boar: *object::info_id(&boar_info),
+            hero: object::uid_to_inner(&hero.id),
+            boar: object::uid_to_inner(&boar_id),
         });
-        object::delete(boar_info);
+        object::delete(boar_id);
 
     }
 
@@ -177,8 +177,8 @@ module examples::hero {
 
     /// Heal the weary hero with a potion
     public fun heal(hero: &mut Hero, potion: Potion) {
-        let Potion { info, potency } = potion;
-        object::delete(info);
+        let Potion { id, potency } = potion;
+        object::delete(id);
         let new_hp = hero.hp + potency;
         // cap hero's HP at MAX_HP to avoid int overflows
         hero.hp = math::min(new_hp, MAX_HP)
@@ -210,13 +210,13 @@ module examples::hero {
         // ensure the user pays enough for the sword
         assert!(value >= MIN_SWORD_COST, EINSUFFICIENT_FUNDS);
         // pay the admin for this sword
-        transfer::transfer(payment, admin());
+        transfer::public_transfer(payment, admin());
 
         // magic of the sword is proportional to the amount you paid, up to
         // a max. one can only imbue a sword with so much magic
         let magic = (value - MIN_SWORD_COST) / MIN_SWORD_COST;
         Sword {
-            info: object::new(ctx),
+            id: object::new(ctx),
             magic: math::min(magic, MAX_MAGIC),
             strength: 1
         }
@@ -225,14 +225,14 @@ module examples::hero {
     public entry fun acquire_hero(payment: Coin<EXAMPLE>, ctx: &mut TxContext) {
         let sword = create_sword(payment, ctx);
         let hero = create_hero(sword, ctx);
-        transfer::transfer(hero, tx_context::sender(ctx))
+        transfer::public_transfer(hero, tx_context::sender(ctx))
     }
 
     /// Anyone can create a hero if they have a sword. All heroes start with the
     /// same attributes.
     public fun create_hero(sword: Sword, ctx: &mut TxContext): Hero {
         Hero {
-            info: object::new(ctx),
+            id: object::new(ctx),
             hp: 100,
             experience: 0,
             sword: option::some(sword),
@@ -248,8 +248,8 @@ module examples::hero {
     ) {
         admin.potions_created = admin.potions_created + 1;
         // send potion to the designated player
-        transfer::transfer(
-            Potion { info: object::new(ctx), potency },
+        transfer::public_transfer(
+            Potion { id: object::new(ctx), potency },
             player
         )
     }
@@ -264,8 +264,8 @@ module examples::hero {
     ) {
         admin.boars_created = admin.boars_created + 1;
         // send boars to the designated player
-        transfer::transfer(
-            Boar { info: object::new(ctx), hp, strength },
+        transfer::public_transfer(
+            Boar { id: object::new(ctx), hp, strength },
             player
         )
     }
@@ -281,17 +281,17 @@ module examples::hero {
 
     #[test_only]
     public fun delete_hero_for_testing(hero: Hero) {
-        let Hero { info, hp: _, experience: _, sword } = hero;
-        object::delete(info);
+        let Hero { id, hp: _, experience: _, sword } = hero;
+        object::delete(id);
         let sword = option::destroy_some(sword);
-        let Sword { info, magic: _, strength: _ } = sword;
-        object::delete(info)
+        let Sword { id, magic: _, strength: _ } = sword;
+        object::delete(id)
     }
 
     #[test_only]
     public fun delete_game_admin_for_testing(admin: GameAdmin) {
-        let GameAdmin { info, boars_created: _, potions_created: _ } = admin;
-        object::delete(info);
+        let GameAdmin { id, boars_created: _, potions_created: _ } = admin;
+        object::delete(id);
     }
 
     #[test]
@@ -303,7 +303,8 @@ module examples::hero {
         let admin = ADMIN;
         let player = @0x0;
 
-        let scenario = &mut test_scenario::begin(&admin);
+        let scenario_val = test_scenario::begin(admin);
+        let scenario = &mut scenario_val;
         // Run the module initializers
         {
             let ctx = test_scenario::ctx(scenario);
@@ -311,34 +312,35 @@ module examples::hero {
             init(ctx);
         };
         // Admin mints 500 coins and sends them to the Player so they can buy game items
-        test_scenario::next_tx(scenario, &admin);
+        test_scenario::next_tx(scenario, admin);
         {
-            let treasury_cap = test_scenario::take_owned<TreasuryCap<EXAMPLE>>(scenario);
+            let treasury_cap = test_scenario::take_from_sender<TreasuryCap<EXAMPLE>>(scenario);
             let ctx = test_scenario::ctx(scenario);
             let coins = coin::mint(&mut treasury_cap, 500, ctx);
-            coin::transfer(coins, copy player);
-            test_scenario::return_owned(scenario, treasury_cap);
+            transfer::public_transfer(coins, copy player);
+            test_scenario::return_to_sender(scenario, treasury_cap);
         };
         // Player purchases a hero with the coins
-        test_scenario::next_tx(scenario, &player);
+        test_scenario::next_tx(scenario, player);
         {
-            let coin = test_scenario::take_owned<Coin<EXAMPLE>>(scenario);
+            let coin = test_scenario::take_from_sender<Coin<EXAMPLE>>(scenario);
             acquire_hero(coin, test_scenario::ctx(scenario));
         };
         // Admin sends a boar to the Player
-        test_scenario::next_tx(scenario, &admin);
+        test_scenario::next_tx(scenario, admin);
         {
-            let admin_cap = test_scenario::take_owned<GameAdmin>(scenario);
+            let admin_cap = test_scenario::take_from_sender<GameAdmin>(scenario);
             send_boar(&mut admin_cap, 10, 10, player, test_scenario::ctx(scenario));
-            test_scenario::return_owned(scenario, admin_cap)
+            test_scenario::return_to_sender(scenario, admin_cap)
         };
         // Player slays the boar!
-        test_scenario::next_tx(scenario, &player);
+        test_scenario::next_tx(scenario, player);
         {
-            let hero = test_scenario::take_owned<Hero>(scenario);
-            let boar = test_scenario::take_owned<Boar>(scenario);
+            let hero = test_scenario::take_from_sender<Hero>(scenario);
+            let boar = test_scenario::take_from_sender<Boar>(scenario);
             slay(&mut hero, boar, test_scenario::ctx(scenario));
-            test_scenario::return_owned(scenario, hero)
+            test_scenario::return_to_sender(scenario, hero)
         };
+        test_scenario::end(scenario_val);
     }
 }

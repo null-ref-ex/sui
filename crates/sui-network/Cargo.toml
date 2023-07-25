@@ -7,13 +7,39 @@ publish = false
 edition = "2021"
 
 [dependencies]
-async-trait = "0.1.53"
-tonic = "0.7"
+anemo.workspace = true
+anemo-tower.workspace = true
+governor.workspace = true
+serde.workspace = true
+tonic.workspace = true
+dashmap.workspace = true
+tower.workspace = true
 
-sui-types = { path = "../sui-types" }
+sui-archival.workspace = true
+sui-storage.workspace = true
+sui-types.workspace = true
+sui-config.workspace = true
+shared-crypto.workspace = true
+sui-swarm-config.workspace = true
 
-mysten-network = { git = "https://github.com/MystenLabs/mysten-infra", rev = "123c9e40b529315e1c1d91a54fb717111c3e349c" }
-workspace-hack = { path = "../workspace-hack"}
+mysten-network.workspace = true
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+futures.workspace = true
+tap.workspace = true
+rand.workspace = true
+anyhow.workspace = true
+prometheus.workspace = true
+mysten-metrics.workspace = true
 
 [build-dependencies]
-tonic-build = { git = "https://github.com/hyperium/tonic.git", rev = "de2e4ac077c076736dc451f3415ea7da1a61a560", default-features = false, features = [ "transport" ] }
+anemo-build.workspace = true
+tonic-build.workspace = true
+
+[dev-dependencies]
+telemetry-subscribers.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+ed25519-consensus.workspace = true
+fastcrypto = { workspace = true }
+tempfile = "3.3.0"

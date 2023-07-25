@@ -1,4 +1,4 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 // tests TransferObject should fail for a quasi-shared object
@@ -10,28 +10,28 @@
 module test::m {
     use sui::transfer;
     use sui::tx_context::TxContext;
-    use sui::object::{Self, Info};
+    use sui::object::{Self, UID};
 
-    struct S has key { info: Info }
-    struct Child has key { info: Info }
+    struct S has key { id: UID }
+    struct Child has key, store { id: UID }
 
     public entry fun mint_s(ctx: &mut TxContext) {
-        let info = object::new(ctx);
-        transfer::share_object(S { info })
+        let id = object::new(ctx);
+        transfer::share_object(S { id })
     }
 
     public entry fun mint_child(s: &mut S, ctx: &mut TxContext) {
-        let info = object::new(ctx);
-        transfer::transfer_to_object(Child { info }, s);
+        let id = object::new(ctx);
+        sui::dynamic_object_field::add(&mut s.id, 0, Child { id });
     }
 }
 
 //# run test::m::mint_s
 
-//# run test::m::mint_child --args object(107)
+//# run test::m::mint_child --args object(2,0)
 
-//# view-object 109
+//# view-object 3,0
 
-//# transfer-object 109 --sender A --recipient B
+//# transfer-object 3,0 --sender A --recipient B
 
-//# view-object 109
+//# view-object 3,0

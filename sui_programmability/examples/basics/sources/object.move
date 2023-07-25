@@ -1,19 +1,19 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 /// An example of a custom object with comments explaining the relevant bits
 module basics::object {
-    use sui::object::{Self, Info};
+    use sui::object::{Self, UID};
     use sui::transfer;
     use sui::tx_context::{Self, TxContext};
 
     /// A custom sui object. Every object must have the `key` attribute
     /// (indicating that it is allowed to be a key in the sui global object
-    /// pool), and must have a field `info: Info` corresponding to its sui ObjId.
+    /// pool), and must have a field `id: UID` corresponding to its sui ObjId.
     /// Other object attributes present at the protocol level (authenticator,
     /// sequence number, TxDigest, ...) are intentionally not exposed here.
     struct Object has key {
-        info: Info,
+        id: UID,
         /// Custom objects can have fields of arbitrary type...
         custom_field: u64,
         /// ... including other objects
@@ -24,7 +24,7 @@ module basics::object {
 
     /// An object that can be stored inside global objects or other child
     /// objects, but cannot be placed in the global object pool on its own.
-    /// Note that it doesn't need an ID field
+    /// Note that it doesn't need an ID field.
     struct ChildObject has store {
         a_field: bool,
     }
@@ -32,7 +32,7 @@ module basics::object {
     /// An object that can live either in the global object pool or as a nested
     /// object.
     struct AnotherObject has key, store {
-        info: Info,
+        id: UID,
     }
 
     /// Example of updating an object. All Move fields are private, so the
@@ -61,38 +61,37 @@ module basics::object {
     /// from this module to read/write it, package it into another object, ...)
     public fun create(tx: &mut TxContext): Object {
         Object {
-            info: object::new(tx),
+            id: object::new(tx),
             custom_field: 0,
             child_obj: ChildObject { a_field: false },
-            nested_obj: AnotherObject { info: object::new(tx) }
+            nested_obj: AnotherObject { id: object::new(tx) }
         }
     }
 
     /// Example of an entrypoint function to be embedded in a Sui
-    /// transaction. The first argument of an entrypoint is always a
-    /// special `TxContext` created by the runtime that is useful for deriving
+    /// transaction. A possible argument of an entrypoint function is a
+    /// `TxContext` created by the runtime that is useful for deriving
     /// new id's or determining the sender of the transaction.
-    /// After the `TxContext`, entrypoints can take struct types with the `key`
+    /// Next to the `TxContext`, entrypoints can take struct types with the `key`
     /// attribute as input, as well as primitive types like ints, bools, ...
     ///
     /// A Sui transaction must declare the ID's of each object it will
     /// access + any primitive inputs. The runtime that processes the
     /// transaction fetches the values associated with the ID's, type-checks
-    /// the values + primitive inputs against the function signature of the
-    /// `main`, then calls the function with these values.
+    /// the values + primitive inputs against the function signature
+    /// , then calls the `main` function with these values.
     ///
     /// If the script terminates successfully, the runtime collects changes to
     /// input objects + created objects + emitted events, increments the
-    /// sequence number each object, creates a hash that commits to the
+    /// sequence number of each object, creates a hash that commits to the
     /// outputs, etc.
     public entry fun main(
-        to_read: &Object,
-        to_write: &mut Object,
-        to_consume: Object,
+        to_read: &Object,      // The argument of type Object is passed as a read-only reference
+        to_write: &mut Object, // The argument is passed as a mutable reference
+        to_consume: Object,    // The argument is passed as a value
         // ... end objects, begin primitive type inputs
         int_input: u64,
         recipient: address,
-        // end primitive types. last arg must be TxContext
         ctx: &mut TxContext,
     ) {
         let v = read_field(to_read);

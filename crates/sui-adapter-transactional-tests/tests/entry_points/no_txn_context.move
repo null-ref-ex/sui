@@ -1,4 +1,4 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 //# init --addresses Test=0x0 --accounts A
@@ -7,13 +7,13 @@
 module Test::M {
     use sui::tx_context::{Self, TxContext};
     struct Obj has key {
-        info: sui::object::Info,
+        id: sui::object::UID,
         value: u64
     }
 
     public entry fun mint(ctx: &mut TxContext) {
         sui::transfer::transfer(
-            Obj { info: sui::object::new(ctx), value: 0 },
+            Obj { id: sui::object::new(ctx), value: 0 },
             tx_context::sender(ctx),
         )
     }
@@ -25,4 +25,4 @@ module Test::M {
 
 //# run Test::M::mint --sender A
 
-//# run Test::M::incr --sender A --args object(106)
+//# run Test::M::incr --sender A --args object(2,0)

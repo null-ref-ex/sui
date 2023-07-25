@@ -1,4 +1,4 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::anyhow;
@@ -56,8 +56,8 @@ impl<P: Display, S: Send, H: AsyncHandler<S>> Shell<P, S, H> {
 
     pub async fn run_async(
         &mut self,
-        out: &mut dyn Write,
-        err: &mut dyn Write,
+        out: &mut (dyn Write + Send),
+        err: &mut (dyn Write + Send),
     ) -> Result<(), anyhow::Error> {
         let config = Config::builder()
             .auto_add_history(true)
@@ -306,12 +306,9 @@ impl CommandStructure {
     }
 
     fn get_child(&self, name: &str) -> Option<&CommandStructure> {
-        for subcommand in self.children.iter() {
-            if subcommand.name == name {
-                return Some(subcommand);
-            }
-        }
-        None
+        self.children
+            .iter()
+            .find(|&subcommand| subcommand.name == name)
     }
 }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 // tests TransferObject with an object with public transfer
@@ -10,19 +10,19 @@
 module test::m {
     use sui::transfer;
     use sui::tx_context::{Self, TxContext};
-    use sui::object::{Self, Info};
+    use sui::object::{Self, UID};
 
-    struct S has store, key { info: Info }
-    struct Cup<phantom T: store> has store, key { info: Info }
+    struct S has store, key { id: UID }
+    struct Cup<phantom T: store> has store, key { id: UID }
 
     public entry fun mint_s(ctx: &mut TxContext) {
-        let info = object::new(ctx);
-        transfer::transfer(S { info }, tx_context::sender(ctx))
+        let id = object::new(ctx);
+        transfer::public_transfer(S { id }, tx_context::sender(ctx))
     }
 
     public entry fun mint_cup<T: store>(ctx: &mut TxContext) {
-        let info = object::new(ctx);
-        transfer::transfer(Cup<T> { info }, tx_context::sender(ctx))
+        let id = object::new(ctx);
+        transfer::public_transfer(Cup<T> { id }, tx_context::sender(ctx))
     }
 }
 
@@ -30,19 +30,19 @@ module test::m {
 
 //# run test::m::mint_s --sender A
 
-//# view-object 107
+//# view-object 2,0
 
-//# transfer-object 107 --sender A --recipient B
+//# transfer-object 2,0 --sender A --recipient B
 
-//# view-object 107
+//# view-object 2,0
 
 
 // Mint Cup<S> to A. Transfer Cup<S> from A to B
 
 //# run test::m::mint_cup --type-args test::m::S --sender A
 
-//# view-object 110
+//# view-object 6,0
 
-//# transfer-object 110 --sender A --recipient B
+//# transfer-object 6,0 --sender A --recipient B
 
-//# view-object 110
+//# view-object 6,0

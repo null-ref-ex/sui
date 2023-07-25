@@ -1,4 +1,4 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 use axum::{
@@ -10,76 +10,74 @@ use axum::{
 };
 use clap::Parser;
 use http::Method;
+use mysten_metrics::spawn_monitored_task;
+use std::env;
 use std::{
     borrow::Cow,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
-use sui::client_commands::{SuiClientCommands, WalletContext};
 use sui_config::{sui_config_dir, SUI_CLIENT_CONFIG};
-use sui_faucet::{Faucet, FaucetRequest, FaucetResponse, SimpleFaucet};
-use tower::ServiceBuilder;
+use sui_faucet::{
+    BatchFaucetResponse, BatchStatusFaucetResponse, Faucet, FaucetConfig, FaucetError,
+    FaucetRequest, FaucetResponse, RequestMetricsLayer, SimpleFaucet,
+};
+use sui_sdk::wallet_context::WalletContext;
+use tower::{limit::RateLimitLayer, ServiceBuilder};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-// TODO: Increase this once we use multiple gas objects
-const CONCURRENCY_LIMIT: usize = 1;
+const CONCURRENCY_LIMIT: usize = 30;
 
-#[derive(Parser)]
-#[clap(
-    name = "Sui Faucet",
-    about = "Faucet for requesting test tokens on Sui",
-    rename_all = "kebab-case"
-)]
-struct FaucetConfig {
-    #[clap(long, default_value_t = 5003)]
-    port: u16,
-
-    #[clap(long, default_value = "127.0.0.1")]
-    host_ip: Ipv4Addr,
-
-    #[clap(long, default_value_t = 50000)]
-    amount: u64,
-
-    #[clap(long, default_value_t = 5)]
-    num_coins: usize,
-
-    #[clap(long, default_value_t = 10)]
-    request_buffer_size: usize,
-
-    #[clap(long, default_value_t = 120)]
-    timeout_in_seconds: u64,
-}
-
-struct AppState<F = SimpleFaucet> {
+struct AppState<F = Arc<SimpleFaucet>> {
     faucet: F,
     config: FaucetConfig,
-    // TODO: add counter
 }
+
+const PROM_PORT_ADDR: &str = "0.0.0.0:9184";
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     // initialize tracing
-    let _guard = telemetry_subscribers::TelemetryConfig::new(env!("CARGO_BIN_NAME"))
+    let _guard = telemetry_subscribers::TelemetryConfig::new()
         .with_env()
         .init();
 
-    let context = create_wallet_context().await?;
+    let max_concurrency = match env::var("MAX_CONCURRENCY") {
+        Ok(val) => val.parse::<usize>().unwrap(),
+        _ => CONCURRENCY_LIMIT,
+    };
+    info!("Max concurrency: {max_concurrency}.");
 
     let config: FaucetConfig = FaucetConfig::parse();
-
     let FaucetConfig {
-        host_ip,
         port,
+        host_ip,
         request_buffer_size,
-        timeout_in_seconds,
+        max_request_per_second,
+        wallet_client_timeout_secs,
+        ref write_ahead_log,
+        wal_retry_interval,
         ..
     } = config;
 
+    let context = create_wallet_context(wallet_client_timeout_secs).await?;
+
+    let prom_binding = PROM_PORT_ADDR.parse().unwrap();
+    info!("Starting Prometheus HTTP endpoint at {}", prom_binding);
+    let registry_service = sui_node::metrics::start_prometheus_server(prom_binding);
+    let prometheus_registry = registry_service.default_registry();
     let app_state = Arc::new(AppState {
-        faucet: SimpleFaucet::new(context).await.unwrap(),
+        faucet: SimpleFaucet::new(
+            context,
+            &prometheus_registry,
+            write_ahead_log,
+            config.clone(),
+        )
+        .await
+        .unwrap(),
         config,
     });
 
@@ -92,16 +90,32 @@ async fn main() -> Result<(), anyhow::Error> {
     let app = Router::new()
         .route("/", get(health))
         .route("/gas", post(request_gas))
+        .route("/v1/gas", post(batch_request_gas))
+        .route("/v1/status", post(request_status))
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(handle_error))
+                .layer(RequestMetricsLayer::new(&prometheus_registry))
                 .layer(cors)
+                .load_shed()
                 .buffer(request_buffer_size)
-                .concurrency_limit(CONCURRENCY_LIMIT)
-                .timeout(Duration::from_secs(timeout_in_seconds))
-                .layer(Extension(app_state))
+                .layer(RateLimitLayer::new(
+                    max_request_per_second,
+                    Duration::from_secs(1),
+                ))
+                .concurrency_limit(max_concurrency)
+                .layer(Extension(app_state.clone()))
                 .into_inner(),
         );
+
+    spawn_monitored_task!(async move {
+        info!("Starting task to clear WAL.");
+        loop {
+            // Every config.wal_retry_interval (Default: 300 seconds) we try to clear the wal coins
+            tokio::time::sleep(Duration::from_secs(wal_retry_interval)).await;
+            app_state.faucet.retry_wal_coins().await.unwrap();
+        }
+    });
 
     let addr = SocketAddr::new(IpAddr::V4(host_ip), port);
     info!("listening on {}", addr);
@@ -116,24 +130,153 @@ async fn health() -> &'static str {
     "OK"
 }
 
+/// handler for batch_request_gas requests
+async fn batch_request_gas(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(payload): Json<FaucetRequest>,
+) -> impl IntoResponse {
+    let id = Uuid::new_v4();
+    // ID for traceability
+    info!(uuid = ?id, "Got new gas request.");
+
+    let FaucetRequest::FixedAmountRequest(request) = payload else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(BatchFaucetResponse::from(FaucetError::Internal(
+                "Input Error.".to_string(),
+            ))),
+        )
+    };
+
+    if state.config.batch_enabled {
+        let result = spawn_monitored_task!(async move {
+            state
+                .faucet
+                .batch_send(
+                    id,
+                    request.recipient,
+                    &vec![state.config.amount; state.config.num_coins],
+                )
+                .await
+        })
+        .await
+        .unwrap();
+
+        match result {
+            Ok(v) => {
+                info!(uuid =?id, "Request is successfully served");
+                (StatusCode::ACCEPTED, Json(BatchFaucetResponse::from(v)))
+            }
+            Err(v) => {
+                warn!(uuid =?id, "Failed to request gas: {:?}", v);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(BatchFaucetResponse::from(v)),
+                )
+            }
+        }
+    } else {
+        // TODO (jian): remove this feature gate when batch has proven to be baked long enough
+        info!(uuid = ?id, "Falling back to v1 implementation");
+        let result = spawn_monitored_task!(async move {
+            state
+                .faucet
+                .send(
+                    id,
+                    request.recipient,
+                    &vec![state.config.amount; state.config.num_coins],
+                )
+                .await
+        })
+        .await
+        .unwrap();
+
+        match result {
+            Ok(_) => {
+                info!(uuid =?id, "Request is successfully served");
+                (StatusCode::ACCEPTED, Json(BatchFaucetResponse::from(id)))
+            }
+            Err(v) => {
+                warn!(uuid =?id, "Failed to request gas: {:?}", v);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(BatchFaucetResponse::from(v)),
+                )
+            }
+        }
+    }
+}
+
+/// handler for batch_get_status requests
+async fn request_status(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(payload): Json<FaucetRequest>,
+) -> impl IntoResponse {
+    match payload {
+        FaucetRequest::GetBatchSendStatusRequest(requests) => {
+            match Uuid::parse_str(&requests.task_id) {
+                Ok(task_id) => {
+                    let result = state.faucet.get_batch_send_status(task_id).await;
+                    match result {
+                        Ok(v) => (
+                            StatusCode::CREATED,
+                            Json(BatchStatusFaucetResponse::from(v)),
+                        ),
+                        Err(v) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(BatchStatusFaucetResponse::from(v)),
+                        ),
+                    }
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(BatchStatusFaucetResponse::from(FaucetError::Internal(
+                        e.to_string(),
+                    ))),
+                ),
+            }
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(BatchStatusFaucetResponse::from(FaucetError::Internal(
+                "Input Error.".to_string(),
+            ))),
+        ),
+    }
+}
+
 /// handler for all the request_gas requests
 async fn request_gas(
-    Json(payload): Json<FaucetRequest>,
     Extension(state): Extension<Arc<AppState>>,
+    Json(payload): Json<FaucetRequest>,
 ) -> impl IntoResponse {
     // ID for traceability
     let id = Uuid::new_v4();
     info!(uuid = ?id, "Got new gas request.");
     let result = match payload {
         FaucetRequest::FixedAmountRequest(requests) => {
-            state
-                .faucet
-                .send(
-                    id,
-                    requests.recipient,
-                    &vec![state.config.amount; state.config.num_coins],
-                )
-                .await
+            // We spawn a tokio task for this such that connection drop will not interrupt
+            // it and impact the recycling of coins
+            spawn_monitored_task!(async move {
+                state
+                    .faucet
+                    .send(
+                        id,
+                        requests.recipient,
+                        &vec![state.config.amount; state.config.num_coins],
+                    )
+                    .await
+            })
+            .await
+            .unwrap()
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(FaucetResponse::from(FaucetError::Internal(
+                    "Input Error.".to_string(),
+                ))),
+            )
         }
     };
     match result {
@@ -151,38 +294,22 @@ async fn request_gas(
     }
 }
 
-async fn create_wallet_context() -> Result<WalletContext, anyhow::Error> {
-    // Create Wallet context.
+async fn create_wallet_context(timeout_secs: u64) -> Result<WalletContext, anyhow::Error> {
     let wallet_conf = sui_config_dir()?.join(SUI_CLIENT_CONFIG);
     info!("Initialize wallet from config path: {:?}", wallet_conf);
-    let mut context = WalletContext::new(&wallet_conf)?;
-    let address = context
-        .config
-        .accounts
-        .first()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Empty wallet context!"))?;
-
-    info!(?address, "Sync client states");
-    // Sync client to retrieve objects from the network.
-    SuiClientCommands::SyncClientState {
-        address: Some(address),
-    }
-    .execute(&mut context)
+    WalletContext::new(
+        &wallet_conf,
+        Some(Duration::from_secs(timeout_secs)),
+        Some(1000),
+    )
     .await
-    .map_err(|err| anyhow::anyhow!("Fail to sync client state: {}", err))?;
-    Ok(context)
 }
 
 async fn handle_error(error: BoxError) -> impl IntoResponse {
-    if error.is::<tower::timeout::error::Elapsed>() {
-        return (StatusCode::REQUEST_TIMEOUT, Cow::from("request timed out"));
-    }
-
     if error.is::<tower::load_shed::error::Overloaded>() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Cow::from("service is overloaded, try again later"),
+            Cow::from("service is overloaded, please try again later"),
         );
     }
 

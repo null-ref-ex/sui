@@ -1,28 +1,42 @@
-processed 8 tasks
+processed 9 tasks
+
+init:
+A: object(0,0)
 
 task 1 'publish'. lines 6-21:
-created: object(103)
-written: object(102)
+created: object(1,0)
+mutated: object(0,1)
+gas summary: computation_cost: 1000000, storage_cost: 5183200,  storage_rebate: 0, non_refundable_storage_fee: 0
 
 task 2 'publish'. lines 23-52:
-created: object(105)
-written: object(104)
+created: object(2,0)
+mutated: object(0,1)
+gas summary: computation_cost: 1000000, storage_cost: 7668400,  storage_rebate: 978120, non_refundable_storage_fee: 9880
 
 task 3 'publish'. lines 55-82:
-created: object(107)
-written: object(106)
+created: object(3,0)
+mutated: object(0,1)
+gas summary: computation_cost: 1000000, storage_cost: 8215600,  storage_rebate: 978120, non_refundable_storage_fee: 9880
 
 task 4 'run'. lines 84-84:
-created: object(109)
-written: object(108)
+created: object(4,0)
+mutated: object(0,0)
+gas summary: computation_cost: 1000000, storage_cost: 2226800,  storage_rebate: 0, non_refundable_storage_fee: 0
 
-task 5 'run'. lines 86-88:
-created: object(111)
-written: object(109), object(110)
+task 5 'run'. lines 86-86:
+created: object(5,0), object(5,1)
+mutated: object(0,0), object(4,0)
+gas summary: computation_cost: 1000000, storage_cost: 5920400,  storage_rebate: 2204532, non_refundable_storage_fee: 22268
 
-task 6 'run'. lines 89-89:
-Error: Transaction Effects Status: Invalid Shared Child Object Usage. When a child object (either direct or indirect) of a shared object is passed by-value to an entry function, either the child object's type or the shared object's type must be defined in the same module as the called function. This is violated by object fake(109), whose ancestor fake(111) is a shared object, and neither are defined in this module..
-Execution Error: ExecutionError: ExecutionError { inner: ExecutionErrorInner { kind: InvalidSharedChildUse(InvalidSharedChildUse { child: fake(109), ancestor: fake(111) }), source: Some("When a child object (either direct or indirect) of a shared object is passed by-value to an entry function, either the child object's type or the shared object's type must be defined in the same module as the called function. This is violated by object fake(109) (defined in module 'T3::O3'), whose ancestor fake(111) is a shared object (defined in module 'T2::O2'), and neither are defined in this module 'T1::O1'") } }
+task 6 'view-object'. lines 88-88:
+Owner: Object ID: ( fake(5,0) )
+Version: 3
+Contents: t3::o3::Obj3 {id: sui::object::UID {id: sui::object::ID {bytes: fake(4,0)}}}
 
-task 7 'run'. lines 91-91:
-written: object(109), object(111), object(113)
+task 7 'view-object'. lines 90-92:
+Owner: Shared
+Version: 3
+Contents: t2::o2::Obj2 {id: sui::object::UID {id: sui::object::ID {bytes: fake(5,1)}}}
+
+task 8 'run'. lines 93-93:
+Error: Error checking transaction input objects: InvalidChildObjectArgument { child_id: 0x466fb7f9c3c2c8e5e958e3597f5b22b28656f86aa5d8092810cde4edc79d7b39, parent_id: 0x8ef41369eee2379bf085587cea4e384d7d00a6e8f975b51abd1bf014b394a87c }

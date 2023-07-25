@@ -1,4 +1,4 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 // tests TransferObject should fail for a package
@@ -10,8 +10,8 @@
 module test::m {}
 
 
-//# view-object 105
+//# view-object 1,0
 
-//# transfer-object 105 --sender A --recipient B
+//# transfer-object 1,0 --sender A --recipient B
 
-//# view-object 105
+//# view-object 1,0

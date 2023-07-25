@@ -1,19 +1,19 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::anyhow;
 use clap::Parser;
 use nexlint::{prelude::*, NexLintContext};
 use nexlint_lints::{
     content::*,
-    handle_lint_results,
     package::*,
     project::{
-        BannedDeps, BannedDepsConfig, DirectDepDups, DirectDepDupsConfig,
-        DirectDuplicateGitDependencies,
+        BannedDepConfig, BannedDepType, BannedDeps, BannedDepsConfig, DirectDepDups,
+        DirectDepDupsConfig, DirectDuplicateGitDependencies,
     },
 };
-
-static LICENSE_HEADER: &str = "Copyright (c) 2022, Mysten Labs, Inc.\n\
+static IGNORE_DIR: &str = "external-crates/";
+static LICENSE_HEADER: &str = "Copyright (c) Mysten Labs, Inc.\n\
                                SPDX-License-Identifier: Apache-2.0\n\
                                ";
 #[derive(Debug, Parser)]
@@ -23,27 +23,61 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> crate::Result<()> {
-    // rand can be removed if/when ed25519_dalek upgrades to rand 0.8
-    let direct_dups_config = DirectDepDupsConfig {
-        allow: vec!["rand".to_string()],
-    };
-    let banned_deps_config = BannedDepsConfig {
-        direct: vec![
+    let banned_deps_config = BannedDepsConfig(
+        vec![
             (
                 "lazy_static".to_owned(),
-                "use once_cell::sync::Lazy instead".to_owned(),
+                BannedDepConfig {
+                    message: "use once_cell::sync::Lazy instead".to_owned(),
+                    type_: BannedDepType::Direct,
+                },
             ),
             (
                 "tracing-test".to_owned(),
-                "you should not be testing against log lines".to_owned(),
+                BannedDepConfig {
+                    message: "you should not be testing against log lines".to_owned(),
+                    type_: BannedDepType::Always,
+                },
+            ),
+            (
+                "openssl-sys".to_owned(),
+                BannedDepConfig {
+                    message: "use rustls for TLS".to_owned(),
+                    type_: BannedDepType::Always,
+                },
+            ),
+            (
+                "actix-web".to_owned(),
+                BannedDepConfig {
+                    message: "use axum for a webframework instead".to_owned(),
+                    type_: BannedDepType::Always,
+                },
+            ),
+            (
+                "warp".to_owned(),
+                BannedDepConfig {
+                    message: "use axum for a webframework instead".to_owned(),
+                    type_: BannedDepType::Always,
+                },
             ),
         ]
         .into_iter()
         .collect(),
+    );
+
+    let direct_dep_dups_config = DirectDepDupsConfig {
+        allow: vec![
+            // TODO spend the time to de-dup these direct dependencies
+            "base64".to_owned(),
+            "clap".to_owned(),
+            "serde_yaml".to_owned(),
+            "syn".to_owned(),
+        ],
     };
+
     let project_linters: &[&dyn ProjectLinter] = &[
-        &DirectDepDups::new(&direct_dups_config),
         &BannedDeps::new(&banned_deps_config),
+        &DirectDepDups::new(&direct_dep_dups_config),
         &DirectDuplicateGitDependencies,
     ];
 
@@ -51,11 +85,12 @@ pub fn run(args: Args) -> crate::Result<()> {
         &CrateNamesPaths,
         &IrrelevantBuildDeps,
         // This one seems to be broken
-        //&UnpublishedPackagesOnlyUsePathDependencies::new(),
+        // &UnpublishedPackagesOnlyUsePathDependencies::new(),
         &PublishedPackagesDontDependOnUnpublishedPackages,
         &OnlyPublishToCratesIo,
         &CratesInCratesDirectory,
-        &CratesOnlyInCratesDirectory,
+        // TODO: re-enable after moving Narwhal crates to crates/, or back to Narwhal repo.
+        // &CratesOnlyInCratesDirectory,
     ];
 
     let file_path_linters: &[&dyn FilePathLinter] = &[
@@ -82,5 +117,34 @@ pub fn run(args: Args) -> crate::Result<()> {
 
     let results = engine.run()?;
 
-    handle_lint_results(results)
+    handle_lint_results_exclude_external_crate_checks(results)
+}
+
+/// Define custom handler so we can skip certain lints on certain files. This is a temporary till we upstream this logic
+pub fn handle_lint_results_exclude_external_crate_checks(
+    results: LintResults,
+) -> crate::Result<()> {
+    // TODO: handle skipped results
+    let mut errs = false;
+    for (source, message) in &results.messages {
+        if let LintKind::Content(path) = source.kind() {
+            if path.starts_with(IGNORE_DIR) && source.name() == "license-header" {
+                continue;
+            }
+        }
+        println!(
+            "[{}] [{}] [{}]: {}\n",
+            message.level(),
+            source.name(),
+            source.kind(),
+            message.message()
+        );
+        errs = true;
+    }
+
+    if errs {
+        Err(anyhow!("there were lint errors"))
+    } else {
+        Ok(())
+    }
 }

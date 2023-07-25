@@ -2,108 +2,73 @@
 title: Write a Sui Move Package
 ---
 
-## 
+Before you can build a Sui Move package and run its code, you must first [install Sui binaries](../install.md#install-or-update-sui-binaries) for your operating system.
 
-In order to build a Move package and run code defined in
-this package, first [install Sui binaries](../install.md#binaries) and
-[clone the repository](../install.md#source-code) as this tutorial assumes
-you have the Sui repository source code in your current directory.
+### Create the package
 
-Refer to the code example developed for this tutorial in the
-[m1.move](https://github.com/MystenLabs/sui/tree/main/sui_programmability/examples/move_tutorial/sources/m1.move) file.
-
-The directory structure used in this tutorial should at the moment
-look as follows (assuming Sui has been cloned to a directory called
-"sui"):
-
-```
-current_directory
-├── sui
-```
-
-For convenience, make sure the path to Sui binaries
-(`~/.cargo/bin`), including the `sui` command used throughout
-this tutorial, is part of your system path:
-
-```
-$ which sui
-```
-
-### Creating the directory structure
-
-Now proceed to creating a package directory structure in the current
-directory, parallel to the `sui` repository. It will contain an
-empty manifest file and an empty module source file following the
-[Move code organization](index.md#move-code-organization)
-described earlier.
-
-So from the same directory containing the `sui` repository create a
-parallel directory to it by running:
+To begin, open a terminal or console at the location you plan to store your package. Use the `sui move new` command to create an empty Sui Move package with the name `my_first_package`:
 
 ``` shell
-$ mkdir -p my_move_package/sources
-touch my_move_package/sources/m1.move
-touch my_move_package/Move.toml
+sui move new my_first_package
 ```
 
-The directory structure should now be (please note that directories at the same indentation level in the figure below should also be at the same level in the file system):
+Running the previous command creates a directory with the name you provide (`my_first_package`). The command populates the new directory with a skeleton Sui Move project that consists of a `sources` directory and a [`Move.toml` manifest](manifest.md). Open the manifest with a text editor to review its contents:
 
-```
-current_directory
-├── sui
-├── my_move_package
-    ├── Move.toml
-    ├── sources
-        ├── m1.move
+```shell
+cat my_first_package/Move.toml
+[package]
+name = "my_first_package"
+version = "0.0.1"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/devnet" }
+
+[addresses]
+my_first_package = "0x0"
+sui = "0000000000000000000000000000000000000000000000000000000000000002"
 ```
 
 ### Defining the package
 
-Let us assume that our module is part of an implementation of a
-fantasy game set in medieval times, where heroes roam the land slaying
-beasts with their trusted swords to gain prizes. All of these entities
-will be represented by Sui objects; in particular, we want a sword to
-be an upgradable asset that can be shared between different players. A
-sword asset can be defined similarly to another asset we are already
-familiar with from our
-[First look at Move source code](../move/index.md#first-look-at-move-source-code). That
-is a `Coin` struct type.
+You have a package now but it doesn't do anything. To make your package useful, you must add logic contained in `.move` source files that define *modules*. Use a text editor or the command line to create your first package source file named `my_module.move` in the `sources` directory of the package:
 
+``` shell
+touch my_first_package/sources/my_module.move
+```
 
-Let us put the following module and struct
-definitions in the `m1.move` file:
+Populate the `my_module.move` file with the following code:
 
-``` rust
-module my_first_package::m1 {
-    use sui::object::Info;
-    use sui::tx_context::TxContext;
+```rust
+module my_first_package::my_module {
 
+    // Part 1: Imports
+    use sui::object::{Self, UID};
+    use sui::transfer;
+    use sui::tx_context::{Self, TxContext};
+
+    // Part 2: Struct definitions
     struct Sword has key, store {
-        info: Info,
+        id: UID,
         magic: u64,
         strength: u64,
     }
-}
-```
 
-Since we are developing a fantasy game, in addition to the mandatory
-`id` field as well as `key` and `store` abilities (same as in the
-`Coin` struct), our asset has both `magic` and `strength` fields
-describing its respective attribute values. Please note that we need
-to import the
-[Object package](https://github.com/MystenLabs/sui/blob/main/crates/sui-framework/sources/object.move) from
-Sui framework to gain access to the `Info` struct type defined
-in this package.
+    struct Forge has key, store {
+        id: UID,
+        swords_created: u64,
+    }
 
-If we want to access sword attributes from a different package, we
-need to add accessor functions to our module similar to the `value`
-function in the Coin package described in [Move
-functions](#move-functions) (please make sure you add these functions,
-and all the following code in this tutorial, in the scope of our
-package - between curly braces starting and ending the package
-definition):
+    // Part 3: Module initializer to be executed when this module is published
+    fun init(ctx: &mut TxContext) {
+        let admin = Forge {
+            id: object::new(ctx),
+            swords_created: 0,
+        };
+        // Transfer the forge object to the module/package publisher
+        transfer::transfer(admin, tx_context::sender(ctx));
+    }
 
-``` rust
+    // Part 4: Accessors required to read the struct attributes
     public fun magic(self: &Sword): u64 {
         self.magic
     }
@@ -111,25 +76,26 @@ definition):
     public fun strength(self: &Sword): u64 {
         self.strength
     }
+
+    public fun swords_created(self: &Forge): u64 {
+        self.swords_created
+    }
+
+    // Part 5: Public/entry functions (introduced later in the tutorial)
+
+    // Part 6: Private functions (if any)
+
+}
 ```
 
-In order to build a package containing this simple module, we need to
-put some required metadata into the `Move.toml` file, including package
-name, package version, local dependency path to locate Sui framework
-code, and package numeric ID, which must be `0x0` for user-defined modules
-to facilitate [package publishing](../cli-client.md#publish-packages).
+The comments in the preceding code highlight different parts of a typical Sui Move source file. 
 
-```
-[package]
-name = "MyFirstPackage"
-version = "0.0.1"
+* **Part 1: Imports** - Code reuse is a necessity in modern programming. Sui Move supports this concept with imports that allow your module to use types and functions declared in other modules. In this example, the module imports from `object`, `transfer`, and `tx_content` modules. These modules are available to the package because the `Move.toml` file defines the Sui dependency (along with the `sui` named address) where they are defined.
 
-[dependencies]
-Sui = { local = "../sui/crates/sui-framework" }
+* **Part 2: Struct declarations** - Structs define types that a module can create or destroy. Struct definitions can include abilities provided with the `has` keyword. The structs in this example, for instance, have the `key` ability, which indicates that these structs are Sui objects that you can transfer between addresses. The `store` ability on the structs provide the ability to appear in other struct fields and be transferred freely.
 
-[addresses]
-my_first_package = "0x0"
-```
+* **Part 3: Module initializer** - A special function that is invoked exactly once when the module publishes.
+    
+* **Part 4: Accessor functions** - These functions allow the fields of the module's structs to be read from other modules.
 
-See the [Move.toml](https://github.com/MystenLabs/sui/blob/main/sui_programmability/examples/move_tutorial/Move.toml)
-file used in our [end-to-end tutorial](../../explore/tutorials.md) for an example.
+After you save the file, you have a complete Sui Move package. Next, you learn to build and test your package to get it ready for publishing.

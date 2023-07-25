@@ -1,53 +1,81 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Base64DataBuffer } from "../serialization/base64";
+import type { Infer } from 'superstruct';
+import {
+	boolean,
+	define,
+	literal,
+	nullable,
+	number,
+	object,
+	record,
+	string,
+	union,
+} from 'superstruct';
+import type { CallArg } from './sui-bcs.js';
 
-/** Base64 string representing the object digest */
-export type TransactionDigest = string;
-export type SuiAddress = string;
-export type ObjectOwner =
-  | { AddressOwner: SuiAddress }
-  | { ObjectOwner: SuiAddress }
-  | { SingleOwner: SuiAddress }
-  | 'Shared'
-  | 'Immutable';
+/** @deprecated Use `string` instead. */
+export const TransactionDigest = string();
+/** @deprecated Use `string` instead. */
+export type TransactionDigest = Infer<typeof TransactionDigest>;
 
+/** @deprecated Use `string` instead. */
+export const TransactionEffectsDigest = string();
+/** @deprecated Use `string` instead. */
+export type TransactionEffectsDigest = Infer<typeof TransactionEffectsDigest>;
 
-// source of truth is
-// https://github.com/MystenLabs/sui/blob/acb2b97ae21f47600e05b0d28127d88d0725561d/crates/sui-types/src/base_types.rs#L171
-const TX_DIGEST_LENGTH = 32;
-// taken from https://rgxdb.com/r/1NUN74O6
-const VALID_BASE64_REGEX =
-  /^(?:[a-zA-Z0-9+\/]{4})*(?:|(?:[a-zA-Z0-9+\/]{3}=)|(?:[a-zA-Z0-9+\/]{2}==)|(?:[a-zA-Z0-9+\/]{1}===))$/;
+/** @deprecated Use `string` instead. */
+export const TransactionEventDigest = string();
+/** @deprecated Use `string` instead. */
+export type TransactionEventDigest = Infer<typeof TransactionEventDigest>;
 
-export function isValidTransactionDigest(value: string): value is TransactionDigest {
-  return new Base64DataBuffer(value).getLength() === TX_DIGEST_LENGTH
-    && VALID_BASE64_REGEX.test(value);
-}
+/** @deprecated Use `string` instead. */
+export const ObjectId = string();
+/** @deprecated Use `string` instead. */
+export type ObjectId = Infer<typeof ObjectId>;
 
-// TODO - can we automatically sync this with rust length definition?
-// Source of truth is
-// https://github.com/MystenLabs/sui/blob/acb2b97ae21f47600e05b0d28127d88d0725561d/crates/sui-types/src/base_types.rs#L67
-// which uses the Move account address length
-// https://github.com/move-language/move/blob/67ec40dc50c66c34fd73512fcc412f3b68d67235/language/move-core/types/src/account_address.rs#L23 .
+/** @deprecated Use `string` instead. */
+export const SuiAddress = string();
+/** @deprecated Use `string` instead. */
+export type SuiAddress = Infer<typeof SuiAddress>;
 
-const SUI_ADDRESS_LENGTH = 20;
-export function isValidSuiAddress(value: string): value is SuiAddress {
-  return isHex(value) &&
-    getHexByteLength(value) === SUI_ADDRESS_LENGTH;
-}
+/** @deprecated Use `string` instead. */
+export const SequenceNumber = string();
+/** @deprecated Use `string` instead. */
+export type SequenceNumber = Infer<typeof SequenceNumber>;
 
-export function isValidSuiObjectId(value: string): boolean {
-  return isValidSuiAddress(value);
-}
+export const ObjectOwner = union([
+	object({
+		AddressOwner: string(),
+	}),
+	object({
+		ObjectOwner: string(),
+	}),
+	object({
+		Shared: object({
+			initial_shared_version: number(),
+		}),
+	}),
+	literal('Immutable'),
+]);
+export type ObjectOwner = Infer<typeof ObjectOwner>;
 
-function isHex(value: string): boolean {
-  return /^(0x|0X)?[a-fA-F0-9]+$/.test(value) && value.length % 2 === 0;
-}
+export type SuiJsonValue = boolean | number | string | CallArg | Array<SuiJsonValue>;
+export const SuiJsonValue = define<SuiJsonValue>('SuiJsonValue', () => true);
 
-function getHexByteLength(value: string): number {
-  return /^(0x|0X)/.test(value)
-    ? (value.length - 2) / 2
-    : value.length / 2;
-}
+const ProtocolConfigValue = union([
+	object({ u32: string() }),
+	object({ u64: string() }),
+	object({ f64: string() }),
+]);
+type ProtocolConfigValue = Infer<typeof ProtocolConfigValue>;
+
+export const ProtocolConfig = object({
+	attributes: record(string(), nullable(ProtocolConfigValue)),
+	featureFlags: record(string(), boolean()),
+	maxSupportedProtocolVersion: string(),
+	minSupportedProtocolVersion: string(),
+	protocolVersion: string(),
+});
+export type ProtocolConfig = Infer<typeof ProtocolConfig>;

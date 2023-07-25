@@ -1,4 +1,4 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 /// This is an implementation of an English auction
@@ -13,7 +13,7 @@
 
 /// A typical lifetime of an auction looks as follows:
 /// - auction is created by the owner and shared with the bidders
-/// - bidders submit bids to try out-biding one another
+/// - bidders submit bids to try out-bidding one another
 ///   - if a submitted bid is higher than the current bid (initially
 ///   there is no bid), the auction is updated with the current bid
 ///   and funds representing previous highest bid are sent to the
@@ -27,7 +27,6 @@
 
 module nfts::shared_auction {
     use sui::coin::{Self, Coin};
-    use sui::object;
     use sui::sui::SUI;
     use sui::tx_context::{Self, TxContext};
 
@@ -43,7 +42,7 @@ module nfts::shared_auction {
     /// Creates an auction. This is executed by the owner of the asset
     /// to be auctioned.
     public entry fun create_auction<T: key + store >(to_sell: T, ctx: &mut TxContext) {
-        let auction = auction_lib::create_auction(object::new(ctx), to_sell, ctx);
+        let auction = auction_lib::create_auction(to_sell, ctx);
         auction_lib::share_object(auction);
     }
 

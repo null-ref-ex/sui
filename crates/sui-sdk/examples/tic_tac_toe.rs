@@ -1,38 +1,44 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
+
+use std::io::{stdin, stdout, Write};
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use async_recursion::async_recursion;
 use clap::Parser;
 use clap::Subcommand;
 use serde::Deserialize;
-use std::io::{stdin, stdout, Write};
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::thread;
-use std::time::Duration;
+
+use shared_crypto::intent::Intent;
+use sui_json_rpc_types::{SuiObjectDataOptions, SuiTransactionBlockResponseOptions};
+use sui_keys::keystore::{AccountKeystore, FileBasedKeystore, Keystore};
 use sui_sdk::{
-    crypto::{Keystore, SuiKeystore},
     json::SuiJsonValue,
+    rpc_types::{SuiData, SuiTransactionBlockEffectsAPI},
     types::{
         base_types::{ObjectID, SuiAddress},
-        crypto::SignableBytes,
-        id::Info,
-        messages::TransactionData,
-        sui_serde::Base64,
+        id::UID,
+        transaction::Transaction,
     },
-    SuiClient,
+    SuiClient, SuiClientBuilder,
 };
+use sui_types::quorum_driver_types::ExecuteTransactionRequestType;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opts: TicTacToeOpts = TicTacToeOpts::parse();
     let keystore_path = opts.keystore_path.unwrap_or_else(default_keystore_path);
-    let keystore = SuiKeystore::load_or_create(&keystore_path)?;
+    let keystore = Keystore::File(FileBasedKeystore::new(&keystore_path)?);
 
     let game = TicTacToe {
         game_package_id: opts.game_package_id,
-        client: SuiClient::new_http_client(&opts.rpc_server_url)?,
+        client: SuiClientBuilder::default()
+            .build(opts.rpc_server_url)
+            .await?,
         keystore,
     };
 
@@ -54,7 +60,7 @@ async fn main() -> Result<(), anyhow::Error> {
 struct TicTacToe {
     game_package_id: ObjectID,
     client: SuiClient,
-    keystore: SuiKeystore,
+    keystore: Keystore,
 }
 
 impl TicTacToe {
@@ -67,49 +73,54 @@ impl TicTacToe {
         let player_x = player_x.unwrap_or_else(|| self.keystore.addresses()[0]);
         let player_o = player_o.unwrap_or_else(|| self.keystore.addresses()[1]);
 
-        // Force a sync of signer's state in gateway.
-        self.client.sync_account_state(player_x).await?;
-
         // Create a move call transaction using the TransactionBuilder API.
         let create_game_call = self
             .client
+            .transaction_builder()
             .move_call(
                 player_x,
                 self.game_package_id,
-                "shared_tic_tac_toe".to_string(),
-                "create_game".to_string(),
+                "shared_tic_tac_toe",
+                "create_game",
                 vec![],
                 vec![
                     SuiJsonValue::from_str(&player_x.to_string())?,
                     SuiJsonValue::from_str(&player_o.to_string())?,
                 ],
-                None, // The gateway server will pick a gas object belong to the signer if not provided.
+                None, // The node will pick a gas object belong to the signer if not provided.
                 1000,
             )
             .await?;
 
-        // Sign the transaction.
-        let transaction_bytes = create_game_call.tx_bytes.to_vec()?;
-
-        // You can do some extra verification here to make sure the transaction created is correct before signing.
-        let _transaction = TransactionData::from_signable_bytes(&transaction_bytes)?;
-
-        // Create a signature using the keystore.
-        let signature = self.keystore.sign(&player_x, &transaction_bytes)?;
-        let signature_base64 = Base64::from_bytes(signature.signature_bytes());
-        let pub_key = Base64::from_bytes(signature.public_key_bytes());
+        // Sign transaction.
+        let signature =
+            self.keystore
+                .sign_secure(&player_x, &create_game_call, Intent::sui_transaction())?;
 
         // Execute the transaction.
+
         let response = self
             .client
-            .execute_transaction(create_game_call.tx_bytes, signature_base64, pub_key)
+            .quorum_driver_api()
+            .execute_transaction_block(
+                Transaction::from_data(
+                    create_game_call,
+                    Intent::sui_transaction(),
+                    vec![signature],
+                ),
+                SuiTransactionBlockResponseOptions::full_content(),
+                Some(ExecuteTransactionRequestType::WaitForLocalExecution),
+            )
             .await?;
+
+        assert!(response.confirmed_local_execution.unwrap());
 
         // We know `create_game` move function will create 1 object.
         let game_id = response
-            .to_effect_response()?
             .effects
-            .created
+            .as_ref()
+            .unwrap()
+            .created()
             .first()
             .unwrap()
             .reference
@@ -167,11 +178,12 @@ impl TicTacToe {
             // Create a move call transaction using the TransactionBuilder API.
             let place_mark_call = self
                 .client
+                .transaction_builder()
                 .move_call(
                     my_identity,
                     self.game_package_id,
-                    "shared_tic_tac_toe".to_string(),
-                    "place_mark".to_string(),
+                    "shared_tic_tac_toe",
+                    "place_mark",
                     vec![],
                     vec![
                         SuiJsonValue::from_str(&game_state.info.object_id().to_hex_literal())?,
@@ -183,20 +195,32 @@ impl TicTacToe {
                 )
                 .await?;
 
-            // Sign the transaction.
-            let transaction_bytes = place_mark_call.tx_bytes.to_vec()?;
-            let signature = self.keystore.sign(&my_identity, &transaction_bytes)?;
-            let signature_base64 = Base64::from_bytes(signature.signature_bytes());
-            let pub_key = Base64::from_bytes(signature.public_key_bytes());
+            // Sign transaction.
+            let signature = self.keystore.sign_secure(
+                &my_identity,
+                &place_mark_call,
+                Intent::sui_transaction(),
+            )?;
 
             // Execute the transaction.
             let response = self
                 .client
-                .execute_transaction(place_mark_call.tx_bytes, signature_base64, pub_key)
+                .quorum_driver_api()
+                .execute_transaction_block(
+                    Transaction::from_data(
+                        place_mark_call,
+                        Intent::sui_transaction(),
+                        vec![signature],
+                    ),
+                    SuiTransactionBlockResponseOptions::new().with_effects(),
+                    Some(ExecuteTransactionRequestType::WaitForLocalExecution),
+                )
                 .await?;
 
+            assert!(response.confirmed_local_execution.unwrap());
+
             // Print any execution error.
-            let status = response.to_effect_response()?.effects.status;
+            let status = response.effects.as_ref().unwrap().status();
             if status.is_err() {
                 eprintln!("{:?}", status);
             }
@@ -228,15 +252,19 @@ impl TicTacToe {
     // Retrieve the latest game state from the server.
     async fn fetch_game_state(&self, game_id: ObjectID) -> Result<TicTacToeState, anyhow::Error> {
         // Get the raw BCS serialised move object data
-        let current_game = self.client.get_raw_object(game_id).await?;
-        let current_game_bytes = current_game
+        let current_game = self
+            .client
+            .read_api()
+            .get_object_with_options(game_id, SuiObjectDataOptions::new().with_bcs())
+            .await?;
+        current_game
             .object()?
-            .data
+            .bcs
+            .as_ref()
+            .unwrap()
             .try_as_move()
-            .map(|m| &m.bcs_bytes)
-            .unwrap();
-        // Deserialize the data bytes into TicTacToeState struct
-        Ok(bcs::from_bytes(current_game_bytes)?)
+            .unwrap()
+            .deserialize()
     }
 }
 
@@ -270,7 +298,7 @@ struct TicTacToeOpts {
     game_package_id: ObjectID,
     #[clap(long)]
     keystore_path: Option<PathBuf>,
-    #[clap(long, default_value = "https://gateway.devnet.sui.io:443")]
+    #[clap(long, default_value = "https://fullnode.devnet.sui.io:443")]
     rpc_server_url: String,
     #[clap(subcommand)]
     subcommand: TicTacToeCommand,
@@ -303,7 +331,7 @@ enum TicTacToeCommand {
 // Data structure mirroring move object `games::shared_tic_tac_toe::TicTacToe` for deserialization.
 #[derive(Deserialize, Debug)]
 struct TicTacToeState {
-    info: Info,
+    info: UID,
     gameboard: Vec<Vec<u8>>,
     cur_turn: u8,
     game_status: u8,

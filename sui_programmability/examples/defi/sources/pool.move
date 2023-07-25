@@ -1,4 +1,4 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 /// Example implementation of a liquidity Pool for Sui.
@@ -9,12 +9,33 @@
 /// - Fees are customizable per Pool.
 /// - Max stored value for both tokens is: U64_MAX / 10_000
 ///
+/// To publish a new pool, a type is required. Eg:
+/// ```
+/// module me::my_pool {
+///   use defi::pool;
+///   use sui::coin::Coin;
+///   use sui::sui::SUI;
+///   use sui::tx_context::TxContext;
+///
+///   struct POOL_TEAM has drop {}
+///
+///   entry fun create_pool<T>(
+///     token: Coin<T>,
+///     sui: Coin<SUI>,
+///     fee_percent: u64,
+///     ctx: &mut TxContext
+///   ) {
+///     pool::create_pool(POOL_TEAM {}, token, sui, fee_percent, ctx)
+///   }
+/// }
+/// ```
+///
 /// This solution is rather simple and is based on the example from the Move repo:
 /// https://github.com/move-language/move/blob/main/language/documentation/examples/experimental/coin-swap/sources/CoinSwap.move
 module defi::pool {
-    use sui::object::{Self, Info};
-    use sui::coin::{Self, Coin, TreasuryCap};
-    use sui::balance::{Self, Balance};
+    use sui::object::{Self, UID};
+    use sui::coin::{Self, Coin};
+    use sui::balance::{Self, Supply, Balance};
     use sui::sui::SUI;
     use sui::transfer;
     use sui::math;
@@ -33,7 +54,7 @@ module defi::pool {
     /// For when initial LSP amount is zero.
     const EShareEmpty: u64 = 3;
 
-    /// For when someone attemps to add more liquidity than u128 Math allows.
+    /// For when someone attempts to add more liquidity than u128 Math allows.
     const EPoolFull: u64 = 4;
 
     /// The integer scaling setting for fees calculation.
@@ -56,32 +77,18 @@ module defi::pool {
     /// - `fee_percent` should be in the range: [0-10000), meaning
     /// that 1000 is 100% and 1 is 0.1%
     struct Pool<phantom P, phantom T> has key {
-        info: Info,
+        id: UID,
         sui: Balance<SUI>,
         token: Balance<T>,
-        lsp_treasury: TreasuryCap<LSP<P, T>>,
+        lsp_supply: Supply<LSP<P, T>>,
         /// Fee Percent is denominated in basis points.
         fee_percent: u64
     }
 
+    #[allow(unused_function)]
     /// Module initializer is empty - to publish a new Pool one has
     /// to create a type which will mark LSPs.
     fun init(_: &mut TxContext) {}
-
-    /// Entrypoint for the `create_pool` method.
-    entry fun create_pool_<P: drop, T>(
-        witness: P,
-        token: Coin<T>,
-        sui: Coin<SUI>,
-        // share: u64,
-        fee_percent: u64,
-        ctx: &mut TxContext
-    ) {
-        transfer::transfer(
-            create_pool(witness, token, sui, /* share, */ fee_percent, ctx),
-            tx_context::sender(ctx)
-        )
-    }
 
     /// Create new `Pool` for token `T`. Each Pool holds a `Coin<T>`
     /// and a `Coin<SUI>`. Swaps are available in both directions.
@@ -104,18 +111,18 @@ module defi::pool {
 
         // Initial share of LSP is the sqrt(a) * sqrt(b)
         let share = math::sqrt(sui_amt) * math::sqrt(tok_amt);
-        let lsp_treasury = coin::create_currency(LSP<P, T> {}, ctx);
-        let lsp = coin::mint(&mut lsp_treasury, share, ctx);
+        let lsp_supply = balance::create_supply(LSP<P, T> {});
+        let lsp = balance::increase_supply(&mut lsp_supply, share);
 
         transfer::share_object(Pool {
-            info: object::new(ctx),
+            id: object::new(ctx),
             token: coin::into_balance(token),
             sui: coin::into_balance(sui),
-            lsp_treasury,
+            lsp_supply,
             fee_percent
         });
 
-        lsp
+        coin::from_balance(lsp, ctx)
     }
 
 
@@ -124,7 +131,7 @@ module defi::pool {
     entry fun swap_sui_<P, T>(
         pool: &mut Pool<P, T>, sui: Coin<SUI>, ctx: &mut TxContext
     ) {
-        transfer::transfer(
+        transfer::public_transfer(
             swap_sui(pool, sui, ctx),
             tx_context::sender(ctx)
         )
@@ -160,7 +167,7 @@ module defi::pool {
     entry fun swap_token_<P, T>(
         pool: &mut Pool<P, T>, token: Coin<T>, ctx: &mut TxContext
     ) {
-        transfer::transfer(
+        transfer::public_transfer(
             swap_token(pool, token, ctx),
             tx_context::sender(ctx)
         )
@@ -194,7 +201,7 @@ module defi::pool {
     entry fun add_liquidity_<P, T>(
         pool: &mut Pool<P, T>, sui: Coin<SUI>, token: Coin<T>, ctx: &mut TxContext
     ) {
-        transfer::transfer(
+        transfer::public_transfer(
             add_liquidity(pool, sui, token, ctx),
             tx_context::sender(ctx)
         );
@@ -227,7 +234,8 @@ module defi::pool {
         assert!(sui_amt < MAX_POOL_VALUE, EPoolFull);
         assert!(tok_amt < MAX_POOL_VALUE, EPoolFull);
 
-        coin::mint(&mut pool.lsp_treasury, share_minted, ctx)
+        let balance = balance::increase_supply(&mut pool.lsp_supply, share_minted);
+        coin::from_balance(balance, ctx)
     }
 
     /// Entrypoint for the `remove_liquidity` method. Transfers
@@ -240,8 +248,8 @@ module defi::pool {
         let (sui, token) = remove_liquidity(pool, lsp, ctx);
         let sender = tx_context::sender(ctx);
 
-        transfer::transfer(sui, sender);
-        transfer::transfer(token, sender);
+        transfer::public_transfer(sui, sender);
+        transfer::public_transfer(token, sender);
     }
 
     /// Remove liquidity from the `Pool` by burning `Coin<LSP>`.
@@ -260,7 +268,7 @@ module defi::pool {
         let sui_removed = (sui_amt * lsp_amount) / lsp_supply;
         let tok_removed = (tok_amt * lsp_amount) / lsp_supply;
 
-        coin::burn(&mut pool.lsp_treasury, lsp);
+        balance::decrease_supply(&mut pool.lsp_supply, coin::into_balance(lsp));
 
         (
             coin::take(&mut pool.sui, sui_removed, ctx),
@@ -291,7 +299,7 @@ module defi::pool {
         (
             balance::value(&pool.sui),
             balance::value(&pool.token),
-            coin::total_supply(&pool.lsp_treasury)
+            balance::supply_value(&pool.lsp_supply)
         )
     }
 
@@ -338,9 +346,10 @@ module defi::pool {
 /// ```
 module defi::pool_tests {
     use sui::sui::SUI;
-    use sui::coin::{mint_for_testing as mint, destroy_for_testing as burn};
+    use sui::coin::{Self, Coin, mint_for_testing as mint};
     use sui::test_scenario::{Self as test, Scenario, next_tx, ctx};
     use defi::pool::{Self, Pool, LSP};
+    use sui::test_utils;
 
     /// Gonna be our test token.
     struct BEEP {}
@@ -353,15 +362,50 @@ module defi::pool_tests {
     const BEEP_AMT: u64 = 1000000;
 
     // Tests section
-    #[test] fun test_init_pool() { test_init_pool_(&mut scenario()) }
-    #[test] fun test_add_liquidity() { test_add_liquidity_(&mut scenario()) }
-    #[test] fun test_swap_sui() { test_swap_sui_(&mut scenario()) }
-    #[test] fun test_swap_tok() { test_swap_tok_(&mut scenario()) }
-    #[test] fun test_withdraw_almost_all() { test_withdraw_almost_all_(&mut scenario()) }
-    #[test] fun test_withdraw_all() { test_withdraw_all_(&mut scenario()) }
+    #[test] fun test_init_pool() {
+        let scenario = scenario();
+        test_init_pool_(&mut scenario);
+        test::end(scenario);
+    }
+    #[test] fun test_add_liquidity() {
+        let scenario = scenario();
+        test_add_liquidity_(&mut scenario);
+        test::end(scenario);
+    }
+    #[test] fun test_swap_sui() {
+        let scenario = scenario();
+        test_swap_sui_(&mut scenario);
+        test::end(scenario);
+    }
+    #[test] fun test_swap_tok() {
+        let scenario = scenario();
+        test_swap_tok_(&mut scenario);
+        test::end(scenario);
+    }
+    #[test] fun test_withdraw_almost_all() {
+        let scenario = scenario();
+        test_withdraw_almost_all_(&mut scenario);
+        test::end(scenario);
+    }
+    #[test] fun test_withdraw_all() {
+        let scenario = scenario();
+        test_withdraw_all_(&mut scenario);
+        test::end(scenario);
+    }
 
     // Non-sequential tests
-    #[test] fun test_math() { test_math_(&mut scenario()) }
+    #[test] fun test_math() {
+        let scenario = scenario();
+        test_math_(&mut scenario);
+        test::end(scenario);
+    }
+
+    #[test_only]
+    fun burn<T>(x: Coin<T>): u64 {
+        let value = coin::value(&x);
+        test_utils::destroy(x);
+        value
+    }
 
     /// Init a Pool with a 1_000_000 BEEP and 1_000_000_000 SUI;
     /// Set the ratio BEEP : SUI = 1 : 1000.
@@ -369,11 +413,13 @@ module defi::pool_tests {
     fun test_init_pool_(test: &mut Scenario) {
         let (owner, _) = people();
 
-        next_tx(test, &owner); {
+        next_tx(test, owner);
+        {
             pool::init_for_testing(ctx(test));
         };
 
-        next_tx(test, &owner); {
+        next_tx(test, owner);
+        {
             let lsp = pool::create_pool(
                 POOLEY {},
                 mint<BEEP>(BEEP_AMT, ctx(test)),
@@ -385,16 +431,17 @@ module defi::pool_tests {
             assert!(burn(lsp) == 31622000, 0);
         };
 
-        next_tx(test, &owner); {
+        next_tx(test, owner);
+        {
             let pool = test::take_shared<Pool<POOLEY, BEEP>>(test);
-            let pool_mut = test::borrow_mut(&mut pool);
+            let pool_mut = &mut pool;
             let (amt_sui, amt_tok, lsp_supply) = pool::get_amounts(pool_mut);
 
             assert!(lsp_supply == 31622000, 0);
             assert!(amt_sui == SUI_AMT, 0);
             assert!(amt_tok == BEEP_AMT, 0);
 
-            test::return_shared(test, pool)
+            test::return_shared(pool)
         };
     }
 
@@ -404,9 +451,10 @@ module defi::pool_tests {
 
         let (_, theguy) = people();
 
-        next_tx(test, &theguy); {
+        next_tx(test, theguy);
+        {
             let pool = test::take_shared<Pool<POOLEY, BEEP>>(test);
-            let pool_mut = test::borrow_mut(&mut pool);
+            let pool_mut = &mut pool;
             let (amt_sui, amt_tok, lsp_supply) = pool::get_amounts(pool_mut);
 
             let lsp_tokens = pool::add_liquidity(
@@ -418,7 +466,7 @@ module defi::pool_tests {
 
             assert!(burn(lsp_tokens) == lsp_supply, 1);
 
-            test::return_shared(test, pool)
+            test::return_shared(pool)
         };
     }
 
@@ -429,9 +477,10 @@ module defi::pool_tests {
 
         let (_, the_guy) = people();
 
-        next_tx(test, &the_guy); {
+        next_tx(test, the_guy);
+        {
             let pool = test::take_shared<Pool<POOLEY, BEEP>>(test);
-            let pool_mut = test::borrow_mut(&mut pool);
+            let pool_mut = &mut pool;
 
             let token = pool::swap_sui(pool_mut, mint<SUI>(5000000, ctx(test)), ctx(test));
 
@@ -440,7 +489,7 @@ module defi::pool_tests {
             // (works better on larger numbers).
             assert!(burn(token) > 4950, 1);
 
-            test::return_shared(test, pool);
+            test::return_shared(pool);
         };
     }
 
@@ -451,16 +500,17 @@ module defi::pool_tests {
 
         let (owner, _) = people();
 
-        next_tx(test, &owner); {
+        next_tx(test, owner);
+        {
             let pool = test::take_shared<Pool<POOLEY, BEEP>>(test);
-            let pool_mut = test::borrow_mut(&mut pool);
+            let pool_mut = &mut pool;
 
             let sui = pool::swap_token(pool_mut, mint<BEEP>(1000, ctx(test)), ctx(test));
 
             // Actual win is 1005971, which is ~ 0.6% profit
             assert!(burn(sui) > 1000000u64, 2);
 
-            test::return_shared(test, pool);
+            test::return_shared(pool);
         };
     }
 
@@ -471,10 +521,11 @@ module defi::pool_tests {
         let (owner, _) = people();
 
         // someone tries to pass (MINTED_LSP - 1) and hopes there will be just 1 BEEP
-        next_tx(test, &owner); {
+        next_tx(test, owner);
+        {
             let lsp = mint<LSP<POOLEY, BEEP>>(31622000 - 1, ctx(test));
             let pool = test::take_shared<Pool<POOLEY, BEEP>>(test);
-            let pool_mut = test::borrow_mut(&mut pool);
+            let pool_mut = &mut pool;
 
             let (sui, tok) = pool::remove_liquidity(pool_mut, lsp, ctx(test));
             let (sui_reserve, tok_reserve, lsp_supply) = pool::get_amounts(pool_mut);
@@ -486,7 +537,7 @@ module defi::pool_tests {
             burn(sui);
             burn(tok);
 
-            test::return_shared(test, pool);
+            test::return_shared(pool);
         }
     }
 
@@ -496,10 +547,11 @@ module defi::pool_tests {
 
         let (owner, _) = people();
 
-        next_tx(test, &owner); {
+        next_tx(test, owner);
+        {
             let lsp = mint<LSP<POOLEY, BEEP>>(31622000, ctx(test));
             let pool = test::take_shared<Pool<POOLEY, BEEP>>(test);
-            let pool_mut = test::borrow_mut(&mut pool);
+            let pool_mut = &mut pool;
 
             let (sui, tok) = pool::remove_liquidity(pool_mut, lsp, ctx(test));
             let (sui_reserve, tok_reserve, lsp_supply) = pool::get_amounts(pool_mut);
@@ -512,7 +564,7 @@ module defi::pool_tests {
             assert!(burn(sui) > 1000000000, 3);
             assert!(burn(tok) < 1000000, 3);
 
-            test::return_shared(test, pool);
+            test::return_shared(pool);
         };
     }
 
@@ -524,13 +576,13 @@ module defi::pool_tests {
         // Try small values
         assert!(pool::get_input_price(10, 1000, 1000, 0) == 9, 0);
 
-        // Even with 0 comission there's this small loss of 1
+        // Even with 0 commission there's this small loss of 1
         assert!(pool::get_input_price(10000, max_val, max_val, 0) == 9999, 0);
         assert!(pool::get_input_price(1000, max_val, max_val, 0) == 999, 0);
         assert!(pool::get_input_price(100, max_val, max_val, 0) == 99, 0);
     }
 
     // utilities
-    fun scenario(): Scenario { test::begin(&@0x1) }
+    fun scenario(): Scenario { test::begin(@0x1) }
     fun people(): (address, address) { (@0xBEEF, @0x1337) }
 }

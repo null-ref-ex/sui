@@ -1,11 +1,12 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 module nfts::geniteam {
-    use sui::bag::{Self, Bag};
-    use sui::collection::{Self, Collection};
-    use sui::object::{Self, Info};
-    use sui::typed_id::{Self, TypedID};
+    use sui::object::{Self, ID, UID};
+    use sui::object_bag::{Self, ObjectBag};
+    use sui::object_table::{Self, ObjectTable};
+    use sui::dynamic_object_field;
+    use nfts::typed_id::{Self, TypedID};
     use sui::tx_context::{Self, TxContext};
     use std::option::{Self, Option};
     use sui::transfer;
@@ -25,7 +26,7 @@ module nfts::geniteam {
     const EInvalidCosmeticsSlot: u64 = 4;
 
     struct Player has key {
-        info: Info,
+        id: UID,
         player_name: String,
         water_runes_count: u64,
         fire_runes_count: u64,
@@ -38,11 +39,11 @@ module nfts::geniteam {
         // Inventory of unassigned cosmetics.
         // A cosmetic can be either a FarmCosmetic or a MonsterCosmetic.
         // Since they can be of different types, we use Bag instead of Collection.
-        inventory: TypedID<Bag>,
+        inventory: ObjectBag,
     }
 
-    struct Farm has key {
-        info: Info,
+    struct Farm has key, store {
+        id: UID,
         farm_name: String,
         farm_img_index: u64,
         level: u64,
@@ -51,7 +52,7 @@ module nfts::geniteam {
         occupied_monster_slots: u64,
 
         // Collection of Pet monsters owned by this Farm
-        pet_monsters: TypedID<Collection<Monster>>,
+        pet_monsters: ObjectTable<ID, Monster>,
 
         // Applied cosmetic at this slot
         applied_farm_cosmetic_0:  Option<TypedID<FarmCosmetic>>,
@@ -60,7 +61,7 @@ module nfts::geniteam {
     }
 
     struct Monster has key, store {
-        info: Info,
+        id: UID,
         monster_name: String,
         monster_img_index: u64,
         breed: u8,
@@ -81,13 +82,13 @@ module nfts::geniteam {
     }
 
     struct FarmCosmetic has key, store{
-        info: Info,
+        id: UID,
         cosmetic_type: u8,
         display: String,
     }
 
     struct MonsterCosmetic has key, store {
-        info: Info,
+        id: UID,
         cosmetic_type: u8,
         display: String,
     }
@@ -115,7 +116,7 @@ module nfts::geniteam {
         let farm_id = typed_id::new(&farm);
 
         // Transfer ownership of farm to player
-        transfer::transfer_to_object(farm, player);
+        dynamic_object_field::add(&mut player.id, farm_id, farm);
 
         // Store the farm
         option::fill(&mut player.owned_farm, farm_id)
@@ -123,9 +124,7 @@ module nfts::geniteam {
 
     /// Create a Monster and add it to the Farm's collection of Monsters, which
     /// is unbounded
-    public entry fun create_monster(_player: &mut Player,
-                              farm: &mut Farm,
-                              pet_monsters: &mut Collection<Monster>,
+    public entry fun create_monster(player: &mut Player,
                               monster_name: vector<u8>,
                               monster_img_index: u64,
                               breed: u8,
@@ -143,60 +142,45 @@ module nfts::geniteam {
             display,
             ctx
         );
+        let id = object::id(&monster);
 
-        // Check if this is the right collection
-        assert!(
-            typed_id::equals_object(&farm.pet_monsters, pet_monsters),
-            EMonsterCollectionNotOwnedByFarm,
-        );
-
+        let farm_id = *option::borrow(&player.owned_farm);
+        let farm: &mut Farm = dynamic_object_field::borrow_mut(&mut player.id, farm_id);
         // TODO: Decouple adding monster to farm from creating a monster.
         // Add it to the collection
-        collection::add(pet_monsters, monster, ctx);
+        object_table::add(&mut farm.pet_monsters, id, monster);
     }
 
     /// Create Farm cosmetic owned by player and add to its inventory
     public fun create_farm_cosmetics(
-        player: &mut Player, inventory: &mut Bag, cosmetic_type: u8,
+        player: &mut Player, cosmetic_type: u8,
         display: vector<u8>, ctx: &mut TxContext
     ) {
-        // Check if this is the right collection
-        assert!(
-            typed_id::equals_object(&player.inventory, inventory),
-            EInventoryNotOwnedByPlayer,
-        );
-
         // Create the farm cosmetic object
         let farm_cosmetic = FarmCosmetic {
-            info: object::new(ctx),
+            id: object::new(ctx),
             cosmetic_type,
             display: ascii::string(display)
             };
 
         // Add it to the player's inventory
-        bag::add(inventory, farm_cosmetic, ctx);
+        object_bag::add(&mut player.inventory, object::id(&farm_cosmetic), farm_cosmetic);
     }
 
     /// Create Monster cosmetic owned by player and add to its inventory
     public fun create_monster_cosmetics(
-        player: &mut Player, inventory: &mut Bag, cosmetic_type: u8,
+        player: &mut Player, cosmetic_type: u8,
         display: vector<u8>, ctx: &mut TxContext
     ) {
-        // Check if this is the right collection
-        assert!(
-            typed_id::equals_object(&player.inventory, inventory),
-            EInventoryNotOwnedByPlayer,
-        );
-
         // Create the farm cosmetic object
         let monster_cosmetic = MonsterCosmetic {
-            info: object::new(ctx),
+            id: object::new(ctx),
             cosmetic_type,
             display: ascii::string(display)
             };
 
         // Add it to the player's inventory
-        bag::add(inventory, monster_cosmetic, ctx);
+        object_bag::add(&mut player.inventory, object::id(&monster_cosmetic), monster_cosmetic);
     }
 
     /// Update the attributes of a player
@@ -215,10 +199,8 @@ module nfts::geniteam {
 
     /// Update the attributes of a monster
     public fun update_monster_stats(
-        _player: &mut Player,
-        _farm: &mut Farm,
-        _pet_monsters: &mut Collection<Monster>,
-        self: &mut Monster,
+        player: &mut Player,
+        monster_id: ID,
         monster_affinity: u8,
         monster_level: u64,
         hunger_level: u64,
@@ -226,13 +208,16 @@ module nfts::geniteam {
         buddy_level: u8,
         display: vector<u8>,
     ) {
-        self.monster_affinity = monster_affinity;
-        self.monster_level = monster_level;
-        self.hunger_level = hunger_level;
-        self.affection_level = affection_level;
-        self.buddy_level = buddy_level;
+        let farm_id = *option::borrow(&player.owned_farm);
+        let farm: &mut Farm = dynamic_object_field::borrow_mut(&mut player.id, farm_id);
+        let monster = object_table::borrow_mut(&mut farm.pet_monsters, monster_id);
+        monster.monster_affinity = monster_affinity;
+        monster.monster_level = monster_level;
+        monster.hunger_level = hunger_level;
+        monster.affection_level = affection_level;
+        monster.buddy_level = buddy_level;
         if (vector::length<u8>(&display) != 0) {
-            self.display = ascii::string(display);
+            monster.display = ascii::string(display);
         }
     }
 
@@ -247,15 +232,17 @@ module nfts::geniteam {
 
     /// Apply the cosmetic to the Farm from the inventory
     public fun update_farm_cosmetics(
-        _player: &mut Player, farm: &mut Farm, _inventory: &mut Bag,
+        player: &mut Player,
         farm_cosmetic: FarmCosmetic, cosmetic_slot_id: u64
     ) {
         // Only 2 slots allowed
         assert!(cosmetic_slot_id <= 1 , EInvalidCosmeticsSlot);
 
         // Transfer ownership of cosmetic to this farm
+        let farm_id = *option::borrow(&player.owned_farm);
+        let farm: &mut Farm = dynamic_object_field::borrow_mut(&mut player.id, farm_id);
         let child_ref = typed_id::new(&farm_cosmetic);
-        transfer::transfer_to_object(farm_cosmetic, farm);
+        dynamic_object_field::add(&mut farm.id, child_ref, farm_cosmetic);
 
         // Assign by slot
         if (cosmetic_slot_id == 0) {
@@ -269,16 +256,17 @@ module nfts::geniteam {
 
     /// Apply the cosmetics to the Monster from the inventory
     public fun update_monster_cosmetics(
-        _player: &mut Player, _farm: &mut Farm, monster: &mut Monster,
-        _inventory: &mut Bag, monster_cosmetic: MonsterCosmetic,
-        _pet_monsters: &mut Collection<Monster>, cosmetic_slot_id: u64,
+        player: &mut Player, monster_id: ID, monster_cosmetic: MonsterCosmetic, cosmetic_slot_id: u64,
     ) {
         // Only 2 slots allowed
         assert!(cosmetic_slot_id <= 1 , EInvalidCosmeticsSlot);
 
+        let farm_id = *option::borrow(&player.owned_farm);
+        let farm: &mut Farm = dynamic_object_field::borrow_mut(&mut player.id, farm_id);
+        let monster = object_table::borrow_mut(&mut farm.pet_monsters, monster_id);
         // Transfer ownership of cosmetic to this monster
         let child_ref = typed_id::new(&monster_cosmetic);
-        transfer::transfer_to_object(monster_cosmetic, monster);
+        dynamic_object_field::add(&mut monster.id, child_ref, monster_cosmetic);
 
         // Assign by slot
         if (cosmetic_slot_id == 0) {
@@ -297,27 +285,21 @@ module nfts::geniteam {
         player_name: vector<u8>, ctx: &mut TxContext
     ): Player {
         // Create a new id for player.
-        let info = object::new(ctx);
+        let id = object::new(ctx);
 
         // Create inventory collection.
-        let inventory = bag::new(ctx);
+        let inventory = object_bag::new(ctx);
 
-        // Transfer ownership of inventory to player.
-        let inventory_id = typed_id::new(&inventory);
-        bag::transfer_to_object_id(inventory, &info);
-
-        let player = Player {
-            info,
+        Player {
+            id,
             player_name: ascii::string(player_name),
             water_runes_count: 0,
             fire_runes_count: 0,
             wind_runes_count: 0,
             earth_runes_count: 0,
             owned_farm: option::none(),
-            inventory: inventory_id
-        };
-
-        player
+            inventory,
+        }
     }
 
     // Constructs a new basic Farm object
@@ -326,30 +308,23 @@ module nfts::geniteam {
         ctx: &mut TxContext
     ): Farm {
         // Create a new id for farm.
-        let info = object::new(ctx);
+        let id = object::new(ctx);
 
         // Create pet monsters collection.
-        let pet_monsters = collection::new<Monster>(ctx);
+        let pet_monsters = object_table::new(ctx);
 
-        // Transfer ownership of pet monsters to farm.
-        let pet_monsters_id = typed_id::new(&pet_monsters);
-        collection::transfer_to_object_id(pet_monsters, &info);
-
-
-        let farm = Farm {
-            info,
+        Farm {
+            id,
             farm_name: ascii::string(farm_name),
             total_monster_slots,
             farm_img_index,
             level: 0,
             current_xp: 0,
             occupied_monster_slots: 0,
-            pet_monsters: pet_monsters_id,
+            pet_monsters,
             applied_farm_cosmetic_0: option::none(),
             applied_farm_cosmetic_1: option::none(),
-        };
-
-        farm
+        }
     }
 
     // Constructs a new basic Monster object
@@ -364,7 +339,7 @@ module nfts::geniteam {
     ): Monster {
 
         Monster {
-            info: object::new(ctx),
+            id: object::new(ctx),
             monster_name: ascii::string(monster_name),
             monster_img_index,
             breed,
@@ -379,5 +354,37 @@ module nfts::geniteam {
             applied_monster_cosmetic_0: option::none(),
             applied_monster_cosmetic_1: option::none(),
         }
+    }
+}
+
+// temp duplicate to unblock
+module nfts::typed_id {
+    use sui::object::{Self, ID};
+
+    /// An ID of an of type `T`. See `ID` for more details
+    /// By construction, it is guaranteed that the `ID` represents an object of type `T`
+    struct TypedID<phantom T: key> has copy, drop, store {
+        id: ID,
+    }
+
+    /// Get the underlying `ID` of `obj`, and remember the type
+    public fun new<T: key>(obj: &T): TypedID<T> {
+        TypedID { id: object::id(obj) }
+    }
+
+    /// Borrow the inner `ID` of `typed_id`
+    public fun as_id<T: key>(typed_id: &TypedID<T>): &ID {
+        &typed_id.id
+    }
+
+    /// Get the inner `ID` of `typed_id`
+    public fun to_id<T: key>(typed_id: TypedID<T>): ID {
+        let TypedID { id } = typed_id;
+        id
+    }
+
+    /// Check that underlying `ID` in the `typed_id` equals the objects ID
+    public fun equals_object<T: key>(typed_id: &TypedID<T>, obj: &T): bool {
+        typed_id.id == object::id(obj)
     }
 }

@@ -1,17 +1,17 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 /// An escrow for atomic swap of objects without a trusted third party
 module defi::shared_escrow {
     use std::option::{Self, Option};
 
-    use sui::object::{Self, ID, Info};
+    use sui::object::{Self, ID, UID};
     use sui::transfer;
     use sui::tx_context::{Self, TxContext};
 
     /// An object held in escrow
     struct EscrowedObj<T: key + store, phantom ExchangeForT: key + store> has key, store {
-        info: Info,
+        id: UID,
         /// owner of the escrowed object
         creator: address,
         /// intended recipient of the escrowed object
@@ -40,11 +40,11 @@ module defi::shared_escrow {
         ctx: &mut TxContext
     ) {
         let creator = tx_context::sender(ctx);
-        let info = object::new(ctx);
+        let id = object::new(ctx);
         let escrowed = option::some(escrowed_item);
-        transfer::share_object(
+        transfer::public_share_object(
             EscrowedObj<T,ExchangeForT> {
-                info, creator, recipient, exchange_for, escrowed
+                id, creator, recipient, exchange_for, escrowed
             }
         );
     }
@@ -53,24 +53,24 @@ module defi::shared_escrow {
     public entry fun exchange<T: key + store, ExchangeForT: key + store>(
         obj: ExchangeForT,
         escrow: &mut EscrowedObj<T, ExchangeForT>,
-        ctx: &mut TxContext
+        ctx: &TxContext
     ) {
         assert!(option::is_some(&escrow.escrowed), EAlreadyExchangedOrCancelled);
         let escrowed_item = option::extract<T>(&mut escrow.escrowed);
         assert!(&tx_context::sender(ctx) == &escrow.recipient, EWrongRecipient);
-        assert!(object::id(&obj) == &escrow.exchange_for, EWrongExchangeObject);
+        assert!(object::borrow_id(&obj) == &escrow.exchange_for, EWrongExchangeObject);
         // everything matches. do the swap!
-        transfer::transfer(escrowed_item, tx_context::sender(ctx));
-        transfer::transfer(obj, escrow.creator);
+        transfer::public_transfer(escrowed_item, tx_context::sender(ctx));
+        transfer::public_transfer(obj, escrow.creator);
     }
 
     /// The `creator` can cancel the escrow and get back the escrowed item
     public entry fun cancel<T: key + store, ExchangeForT: key + store>(
         escrow: &mut EscrowedObj<T, ExchangeForT>,
-        ctx: &mut TxContext
+        ctx: &TxContext
     ) {
         assert!(&tx_context::sender(ctx) == &escrow.creator, EWrongOwner);
         assert!(option::is_some(&escrow.escrowed), EAlreadyExchangedOrCancelled);
-        transfer::transfer(option::extract<T>(&mut escrow.escrowed), escrow.creator);
+        transfer::public_transfer(option::extract<T>(&mut escrow.escrowed), escrow.creator);
     }
 }

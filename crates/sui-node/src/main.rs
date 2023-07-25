@@ -1,14 +1,41 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::Result;
 use clap::Parser;
-use multiaddr::Multiaddr;
+use mysten_common::sync::async_once_cell::AsyncOnceCell;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 use sui_config::{Config, NodeConfig};
+use sui_core::runtime::SuiRuntimes;
+use sui_node::metrics;
+use sui_protocol_config::SupportedProtocolVersions;
+use sui_telemetry::send_telemetry_event;
+use sui_types::multiaddr::Multiaddr;
+use tokio::time::sleep;
+use tracing::{error, info};
+
+const GIT_REVISION: &str = {
+    if let Some(revision) = option_env!("GIT_REVISION") {
+        revision
+    } else {
+        let version = git_version::git_version!(
+            args = ["--always", "--dirty", "--exclude", "*"],
+            fallback = ""
+        );
+
+        if version.is_empty() {
+            panic!("unable to query git revision");
+        }
+        version
+    }
+};
+const VERSION: &str = const_str::concat!(env!("CARGO_PKG_VERSION"), "-", GIT_REVISION);
 
 #[derive(Parser)]
 #[clap(rename_all = "kebab-case")]
+#[clap(name = env!("CARGO_BIN_NAME"))]
+#[clap(version = VERSION)]
 struct Args {
     #[clap(long)]
     pub config_path: PathBuf,
@@ -17,67 +44,140 @@ struct Args {
     listen_address: Option<Multiaddr>,
 }
 
-// For memory profiling info see https://github.com/jemalloc/jemalloc/wiki/Use-Case%3A-Heap-Profiling
-// Example: set JE_MALLOC_CONF or _RJEM_MALLOC_CONF to:
-//   prof:true,lg_prof_interval:24,lg_prof_sample:19
-// The above means: turn on profiling, sample every 2^19 or 512KB bytes allocated,
-//   and dump out profile every 2^24 or 16MB of memory allocated.
-//
-// See [doc/src/contribute/observability.md] for more info.
-#[cfg(not(target_env = "msvc"))]
-use jemalloc_ctl::{epoch, stats};
-#[cfg(not(target_env = "msvc"))]
-use jemallocator::Jemalloc;
-
-#[cfg(not(target_env = "msvc"))]
-#[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize logging
-    let (_guard, filter_handle) =
-        telemetry_subscribers::TelemetryConfig::new(env!("CARGO_BIN_NAME"))
-            .with_env()
-            .init();
+fn main() {
+    // Ensure that a validator never calls get_for_min_version/get_for_max_version_UNSAFE.
+    // TODO: re-enable after we figure out how to eliminate crashes in prod because of this.
+    // ProtocolConfig::poison_get_for_min_version();
 
     let args = Args::parse();
+    let mut config = NodeConfig::load(&args.config_path).unwrap();
+    assert!(
+        config.supported_protocol_versions.is_none(),
+        "supported_protocol_versions cannot be read from the config file"
+    );
+    config.supported_protocol_versions = Some(SupportedProtocolVersions::SYSTEM_DEFAULT);
 
-    let mut config = NodeConfig::load(&args.config_path)?;
+    let runtimes = SuiRuntimes::new(&config);
+    let registry_service = {
+        let _enter = runtimes.metrics.enter();
+        metrics::start_prometheus_server(config.metrics_address)
+    };
+    let prometheus_registry = registry_service.default_registry();
+
+    // Initialize logging
+    let (_guard, filter_handle) = telemetry_subscribers::TelemetryConfig::new()
+        // Set a default
+        .with_sample_nth(10)
+        .with_target_prefix("sui_json_rpc")
+        .with_env()
+        .with_prom_registry(&prometheus_registry)
+        .init();
+
+    info!("Sui Node version: {VERSION}");
+    info!(
+        "Supported protocol versions: {:?}",
+        config.supported_protocol_versions
+    );
+
+    info!(
+        "Started Prometheus HTTP endpoint at {}",
+        config.metrics_address
+    );
+
+    {
+        let _enter = runtimes.metrics.enter();
+        metrics::start_metrics_push_task(&config, registry_service.clone());
+    }
 
     if let Some(listen_address) = args.listen_address {
         config.network_address = listen_address;
     }
 
-    #[cfg(not(target_env = "msvc"))]
-    {
-        use jemalloc_ctl::config;
-        use std::time::Duration;
-        use tracing::info;
+    let is_validator = config.consensus_config().is_some();
 
-        let malloc_conf = config::malloc_conf::mib().unwrap();
-        info!("Default Jemalloc conf: {}", malloc_conf.read().unwrap());
+    let admin_interface_port = config.admin_interface_port;
 
-        std::thread::spawn(|| {
-            loop {
-                // many statistics are cached and only updated when the epoch is advanced.
-                epoch::advance().unwrap();
+    // Run node in a separate runtime so that admin/monitoring functions continue to work
+    // if it deadlocks.
+    let node_once_cell = Arc::new(AsyncOnceCell::<Arc<sui_node::SuiNode>>::new());
+    let node_once_cell_clone = node_once_cell.clone();
+    let rpc_runtime = runtimes.json_rpc.handle().clone();
 
-                let allocated = stats::allocated::read().unwrap() / (1024 * 1024);
-                let resident = stats::resident::read().unwrap() / (1024 * 1024);
-                info!(
-                    "Jemalloc: {} MB allocated / {} MB resident",
-                    allocated, resident
-                );
-                std::thread::sleep(Duration::from_secs(60));
-            }
-        });
-    }
+    runtimes.sui_node.spawn(async move {
+        if let Err(e) = sui_node::SuiNode::start_async(
+            &config,
+            registry_service,
+            node_once_cell_clone,
+            Some(rpc_runtime),
+        )
+        .await
+        {
+            error!("Failed to start node: {e:?}");
+            std::process::exit(1)
+        }
+        // TODO: Do we want to provide a way for the node to gracefully shutdown?
+        loop {
+            tokio::time::sleep(Duration::from_secs(1000)).await;
+        }
+    });
 
-    sui_node::admin::start_admin_server(config.admin_interface_port, filter_handle);
+    let node_once_cell_clone = node_once_cell.clone();
+    runtimes.metrics.spawn(async move {
+        let node = node_once_cell_clone.get().await;
+        let chain_identifier = match node.state().get_chain_identifier() {
+            Some(chain_identifier) => chain_identifier.to_string(),
+            None => "Unknown".to_string(),
+        };
 
-    let node = sui_node::SuiNode::start(&config).await?;
-    node.wait().await?;
+        info!("Sui chain identifier: {chain_identifier}");
+        prometheus_registry
+            .register(mysten_metrics::uptime_metric(
+                VERSION,
+                chain_identifier.as_str(),
+            ))
+            .unwrap();
 
-    Ok(())
+        sui_node::admin::run_admin_server(node, admin_interface_port, filter_handle).await
+    });
+
+    runtimes.metrics.spawn(async move {
+        let node = node_once_cell.get().await;
+        let state = node.state();
+        loop {
+            send_telemetry_event(state.clone(), is_validator).await;
+            sleep(Duration::from_secs(3600)).await;
+        }
+    });
+
+    // wait for SIGINT on the main thread
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(wait_termination());
+
+    // Drop and wait all runtimes on main thread
+    drop(runtimes);
+}
+
+#[cfg(not(unix))]
+// On windows we wait for whatever "ctrl_c" means there
+async fn wait_termination() {
+    tokio::signal::ctrl_c().await.unwrap()
+}
+
+#[cfg(unix)]
+// On unix we wait for both SIGINT (when run in terminal) and SIGTERM(when run in docker or other supervisor)
+// Docker stop sends SIGTERM: https://www.baeldung.com/ops/docker-stop-vs-kill#:~:text=The%20docker%20stop%20commands%20issue,rather%20than%20killing%20it%20immediately.
+// Systemd by default sends SIGTERM as well: https://www.freedesktop.org/software/systemd/man/systemd.kill.html
+// Upstart also sends SIGTERM by default: https://upstart.ubuntu.com/cookbook/#kill-signal
+async fn wait_termination() {
+    use futures::future::select;
+    use futures::FutureExt;
+    use tokio::signal::unix::*;
+
+    let sigint = tokio::signal::ctrl_c().map(Result::ok).boxed();
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
+    let sigterm_recv = sigterm.recv().boxed();
+    select(sigint, sigterm_recv).await;
 }

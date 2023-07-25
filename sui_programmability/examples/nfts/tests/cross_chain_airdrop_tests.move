@@ -1,10 +1,10 @@
-// Copyright (c) 2022, Mysten Labs, Inc.
+// Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 #[test_only]
 module nfts::cross_chain_airdrop_tests {
     use nfts::cross_chain_airdrop::{Self, CrossChainAirdropOracle, ERC721};
-    use sui::object::{Info};
+    use sui::object::{UID};
     use sui::test_scenario::{Self, Scenario};
 
     // Error codes
@@ -21,34 +21,36 @@ module nfts::cross_chain_airdrop_tests {
     const TOKEN_URI: vector<u8> = b"ipfs://QmeSjSinHpPnmXmspMjwiXyN6zS4E9zccariGR3jxcaWtq/101";
 
     struct Object has key {
-        info: Info,
+        id: UID,
     }
 
     #[test]
     fun test_claim_airdrop() {
-        let (scenario, oracle_address) = init();
+        let (scenario, oracle_address) = init_scenario();
 
         // claim a token
-        claim_token(&mut scenario, &oracle_address, SOURCE_TOKEN_ID);
+        claim_token(&mut scenario, oracle_address, SOURCE_TOKEN_ID);
 
         // verify that the recipient has received the nft
-        assert!(owns_object(&mut scenario, &RECIPIENT_ADDRESS), EOBJECT_NOT_FOUND);
+        assert!(owns_object(RECIPIENT_ADDRESS), EOBJECT_NOT_FOUND);
+        test_scenario::end(scenario);
     }
 
     #[test]
-    #[expected_failure(abort_code = 0)]
+    #[expected_failure(abort_code = cross_chain_airdrop::ETokenIDClaimed)]
     fun test_double_claim() {
-        let (scenario, oracle_address) = init();
+        let (scenario, oracle_address) = init_scenario();
 
         // claim a token
-        claim_token(&mut scenario, &oracle_address, SOURCE_TOKEN_ID);
+        claim_token(&mut scenario, oracle_address, SOURCE_TOKEN_ID);
 
         // claim the same token again
-        claim_token(&mut scenario, &oracle_address, SOURCE_TOKEN_ID);
+        claim_token(&mut scenario, oracle_address, SOURCE_TOKEN_ID);
+        test_scenario::end(scenario);
     }
 
-    fun init(): (Scenario, address) {
-        let scenario = test_scenario::begin(&ORACLE_ADDRESS);
+    fun init_scenario(): (Scenario, address) {
+        let scenario = test_scenario::begin(ORACLE_ADDRESS);
         {
             let ctx = test_scenario::ctx(&mut scenario);
             cross_chain_airdrop::test_init(ctx);
@@ -56,10 +58,10 @@ module nfts::cross_chain_airdrop_tests {
         (scenario, ORACLE_ADDRESS)
     }
 
-    fun claim_token(scenario: &mut Scenario, oracle_address: &address, token_id: u64) {
+    fun claim_token(scenario: &mut Scenario, oracle_address: address, token_id: u64) {
         test_scenario::next_tx(scenario, oracle_address);
         {
-            let oracle = test_scenario::take_owned<CrossChainAirdropOracle>(scenario);
+            let oracle = test_scenario::take_from_sender<CrossChainAirdropOracle>(scenario);
             let ctx = test_scenario::ctx(scenario);
             cross_chain_airdrop::claim(
                 &mut oracle,
@@ -70,13 +72,13 @@ module nfts::cross_chain_airdrop_tests {
                 TOKEN_URI,
                 ctx,
             );
-            test_scenario::return_owned(scenario, oracle);
+            test_scenario::return_to_sender(scenario, oracle);
         };
+        test_scenario::next_tx(scenario, oracle_address);
     }
 
-    fun owns_object(scenario: &mut Scenario, owner: &address): bool{
+    fun owns_object(owner: address): bool{
         // Verify the token has been transfer to the recipient
-        test_scenario::next_tx(scenario, owner);
-        test_scenario::can_take_owned<ERC721>(scenario)
+        test_scenario::has_most_recent_for_address<ERC721>(owner)
     }
 }
